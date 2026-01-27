@@ -1,0 +1,26 @@
+__pycache__/
+*.py[cod]
+*.pyd
+*.pyo
+*.so
+
+# virtual environments
+venv*/
+.venv_py310/
+tracker_env/
+.venv/
+
+# training outputs
+runs*/
+wandb/
+
+# weights / exports
+*.pt
+*.onnx
+*.engine
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

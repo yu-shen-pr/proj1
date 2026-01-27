@@ -1,0 +1,6 @@
+path: D:/undergraduate/proj1/A-Simple-Detector-is-a-Strong-Tracker-main/Data/yolo_fold4
+train: images/train
+val: images/val
+nc: 1
+names:
+- uav
