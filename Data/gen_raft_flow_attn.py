@@ -39,7 +39,42 @@ def _quantile_or_max(x: torch.Tensor, q: float) -> float:
         return float(x.max().item())
 
 
-def _flow_to_uint8(flow: torch.Tensor, q: float = 0.99) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _compute_attn_mag(flow: torch.Tensor, q: float) -> torch.Tensor:
+    u = flow[0]
+    v = flow[1]
+    mag = torch.sqrt(u * u + v * v)
+    mag_scale = max(_quantile_or_max(mag, q), 1e-6)
+    return (mag / mag_scale).clamp(0.0, 1.0)
+
+
+def _compute_attn_coherence_gate(flow: torch.Tensor, q: float, *, coh_tau: float, coh_k: float) -> torch.Tensor:
+    u = flow[0:1]
+    v = flow[1:2]
+
+    mag = torch.sqrt(u * u + v * v)
+
+    u_mean = F.avg_pool2d(u, kernel_size=3, stride=1, padding=1)
+    v_mean = F.avg_pool2d(v, kernel_size=3, stride=1, padding=1)
+
+    mag_mean = torch.sqrt(u_mean * u_mean + v_mean * v_mean)
+
+    eps = 1e-6
+    cos = (u * u_mean + v * v_mean) / (mag * mag_mean + eps)
+    cos = cos.clamp(-1.0, 1.0)
+
+    gate = torch.sigmoid((cos - float(coh_tau)) * float(coh_k))
+    saliency = _compute_attn_mag(flow, q=q).unsqueeze(0)
+    return (saliency * gate).squeeze(0).clamp(0.0, 1.0)
+
+
+def _flow_to_uint8(
+    flow: torch.Tensor,
+    q: float = 0.99,
+    *,
+    attn_mode: str = "mag",
+    coh_tau: float = 0.2,
+    coh_k: float = 5.0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     # flow: [2, H, W] on CPU
     u = flow[0]
     v = flow[1]
@@ -52,9 +87,14 @@ def _flow_to_uint8(flow: torch.Tensor, q: float = 0.99) -> tuple[np.ndarray, np.
     u8 = (u01 * 255.0).round().clamp(0.0, 255.0).to(torch.uint8).cpu().numpy()
     v8 = (v01 * 255.0).round().clamp(0.0, 255.0).to(torch.uint8).cpu().numpy()
 
-    mag = torch.sqrt(u * u + v * v)
-    mag_scale = max(_quantile_or_max(mag, q), 1e-6)
-    attn = (mag / mag_scale).clamp(0.0, 1.0).cpu().numpy().astype(np.float32)
+    if attn_mode == "mag":
+        attn_t = _compute_attn_mag(flow, q=q)
+    elif attn_mode == "coh":
+        attn_t = _compute_attn_coherence_gate(flow, q=q, coh_tau=coh_tau, coh_k=coh_k)
+    else:
+        raise ValueError(f"Unknown attn_mode: {attn_mode}")
+
+    attn = attn_t.cpu().numpy().astype(np.float32)
 
     return u8, v8, attn
 
@@ -116,6 +156,9 @@ def main() -> int:
     ap.add_argument("--flow_q", type=float, default=0.99)
     ap.add_argument("--no_attn", action="store_true")
     ap.add_argument("--normalize_dt", action="store_true")
+    ap.add_argument("--attn_mode", type=str, default="mag", choices=["mag", "coh"])
+    ap.add_argument("--coh_tau", type=float, default=0.2)
+    ap.add_argument("--coh_k", type=float, default=5.0)
     args = ap.parse_args()
 
     in_root = Path(args.in_root)
@@ -208,7 +251,13 @@ def main() -> int:
                             dt = 1
                         flow = flow / float(dt)
 
-                    u8, v8, attn = _flow_to_uint8(flow, q=float(args.flow_q))
+                    u8, v8, attn = _flow_to_uint8(
+                        flow,
+                        q=float(args.flow_q),
+                        attn_mode=str(args.attn_mode),
+                        coh_tau=float(args.coh_tau),
+                        coh_k=float(args.coh_k),
+                    )
                     if args.no_attn:
                         merged = _merge_no_attn(gray_u8, u8, v8)
                     else:
