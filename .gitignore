@@ -14,6 +14,9 @@ tracker_env/
 runs*/
 wandb/
 
+# raw dataset (too large for GitHub)
+Data/train/
+
 # weights / exports
 *.pt
 *.onnx
