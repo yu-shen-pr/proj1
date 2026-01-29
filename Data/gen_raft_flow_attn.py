@@ -115,6 +115,7 @@ def main() -> int:
     ap.add_argument("--alpha", type=float, default=1.0)
     ap.add_argument("--flow_q", type=float, default=0.99)
     ap.add_argument("--no_attn", action="store_true")
+    ap.add_argument("--normalize_dt", action="store_true")
     args = ap.parse_args()
 
     in_root = Path(args.in_root)
@@ -150,8 +151,9 @@ def main() -> int:
         with torch.inference_mode():
             for seq, frames in tqdm(seq_to_frames.items(), desc=f"RAFT {split}"):
                 prev_img_p: Path | None = None
+                prev_idx: int | None = None
 
-                for _, cur_img_p in frames:
+                for cur_idx, cur_img_p in frames:
                     out_img_p = out_images / cur_img_p.name
                     out_lbl_p = out_labels / (cur_img_p.stem + ".txt")
 
@@ -174,6 +176,7 @@ def main() -> int:
                             merged = _apply_attn(gray_u8, u8, v8, attn, float(args.alpha))
                         Image.fromarray(merged).save(out_img_p)
                         prev_img_p = cur_img_p
+                        prev_idx = cur_idx
                         continue
 
                     prev_img = Image.open(prev_img_p).convert("RGB")
@@ -197,6 +200,14 @@ def main() -> int:
                         flow[:, 1] *= scale_y
                         flow = flow[0]
 
+                    if args.normalize_dt:
+                        dt = 1
+                        if prev_idx is not None:
+                            dt = int(cur_idx) - int(prev_idx)
+                        if dt <= 0:
+                            dt = 1
+                        flow = flow / float(dt)
+
                     u8, v8, attn = _flow_to_uint8(flow, q=float(args.flow_q))
                     if args.no_attn:
                         merged = _merge_no_attn(gray_u8, u8, v8)
@@ -205,6 +216,7 @@ def main() -> int:
                     Image.fromarray(merged).save(out_img_p)
 
                     prev_img_p = cur_img_p
+                    prev_idx = cur_idx
 
     _write_dataset_yaml(out_root, ["uav"])
     return 0
