@@ -82,6 +82,18 @@ def _apply_attn(gray_u8: np.ndarray, u8: np.ndarray, v8: np.ndarray, attn: np.nd
     return out
 
 
+def _merge_no_attn(gray_u8: np.ndarray, u8: np.ndarray, v8: np.ndarray) -> np.ndarray:
+    out = np.stack(
+        [
+            gray_u8.astype(np.uint8),
+            v8.astype(np.uint8),
+            u8.astype(np.uint8),
+        ],
+        axis=-1,
+    )
+    return out
+
+
 def _ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
 
@@ -102,6 +114,7 @@ def main() -> int:
     ap.add_argument("--device", type=str, default="cuda")
     ap.add_argument("--alpha", type=float, default=1.0)
     ap.add_argument("--flow_q", type=float, default=0.99)
+    ap.add_argument("--no_attn", action="store_true")
     args = ap.parse_args()
 
     in_root = Path(args.in_root)
@@ -155,7 +168,10 @@ def main() -> int:
                         u8 = np.full_like(gray_u8, 128, dtype=np.uint8)
                         v8 = np.full_like(gray_u8, 128, dtype=np.uint8)
                         attn = np.zeros_like(gray_u8, dtype=np.float32)
-                        merged = _apply_attn(gray_u8, u8, v8, attn, float(args.alpha))
+                        if args.no_attn:
+                            merged = _merge_no_attn(gray_u8, u8, v8)
+                        else:
+                            merged = _apply_attn(gray_u8, u8, v8, attn, float(args.alpha))
                         Image.fromarray(merged).save(out_img_p)
                         prev_img_p = cur_img_p
                         continue
@@ -182,7 +198,10 @@ def main() -> int:
                         flow = flow[0]
 
                     u8, v8, attn = _flow_to_uint8(flow, q=float(args.flow_q))
-                    merged = _apply_attn(gray_u8, u8, v8, attn, float(args.alpha))
+                    if args.no_attn:
+                        merged = _merge_no_attn(gray_u8, u8, v8)
+                    else:
+                        merged = _apply_attn(gray_u8, u8, v8, attn, float(args.alpha))
                     Image.fromarray(merged).save(out_img_p)
 
                     prev_img_p = cur_img_p
