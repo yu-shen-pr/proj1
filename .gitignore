@@ -14,6 +14,9 @@ tracker_env/
 runs*/
 wandb/
 
+# experiment csv outputs
+result/
+
 # raw dataset (too large for GitHub)
 Data/train/
 

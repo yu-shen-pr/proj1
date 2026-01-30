@@ -158,6 +158,19 @@ def _apply_attn(gray_u8: np.ndarray, u8: np.ndarray, v8: np.ndarray, attn: np.nd
     return out
 
 
+def _merge_motion(u8: np.ndarray, v8: np.ndarray, attn: np.ndarray) -> np.ndarray:
+    a8 = (np.clip(attn, 0.0, 1.0) * 255.0).round().astype(np.uint8)
+    out = np.stack(
+        [
+            u8.astype(np.uint8),
+            v8.astype(np.uint8),
+            a8,
+        ],
+        axis=-1,
+    )
+    return out
+
+
 def _merge_no_attn(gray_u8: np.ndarray, u8: np.ndarray, v8: np.ndarray) -> np.ndarray:
     out = np.stack(
         [
@@ -188,6 +201,7 @@ def main() -> int:
     ap.add_argument("--in_root", type=str, default="Data/yolo_fold4")
     ap.add_argument("--out_root", type=str, default="Data/yolo_fold4_raft_attn")
     ap.add_argument("--device", type=str, default="cuda")
+    ap.add_argument("--image_mode", type=str, default="merged", choices=["merged", "rgb"])
     ap.add_argument("--alpha", type=float, default=1.0)
     ap.add_argument("--flow_q", type=float, default=0.99)
     ap.add_argument("--attn_q", type=float, default=None)
@@ -199,6 +213,8 @@ def main() -> int:
     ap.add_argument("--attn_mode", type=str, default="mag", choices=["mag", "coh"])
     ap.add_argument("--coh_tau", type=float, default=0.2)
     ap.add_argument("--coh_k", type=float, default=5.0)
+    ap.add_argument("--save_rgb", action="store_true")
+    ap.add_argument("--save_motion", action="store_true")
     args = ap.parse_args()
 
     in_root = Path(args.in_root)
@@ -215,8 +231,14 @@ def main() -> int:
         in_labels = in_root / "labels" / split
         out_images = out_root / "images" / split
         out_labels = out_root / "labels" / split
+        out_rgb_images = out_root / "rgb_images" / split
+        out_motion_images = out_root / "motion_images" / split
         _ensure_dir(out_images)
         _ensure_dir(out_labels)
+        if args.save_rgb:
+            _ensure_dir(out_rgb_images)
+        if args.save_motion:
+            _ensure_dir(out_motion_images)
 
         img_paths = sorted([p for p in in_images.iterdir() if p.suffix.lower() in {".jpg", ".png", ".jpeg"}])
 
@@ -239,6 +261,8 @@ def main() -> int:
                 for cur_idx, cur_img_p in frames:
                     out_img_p = out_images / cur_img_p.name
                     out_lbl_p = out_labels / (cur_img_p.stem + ".txt")
+                    out_rgb_p = out_rgb_images / cur_img_p.name
+                    out_motion_p = out_motion_images / cur_img_p.name
 
                     src_lbl = in_labels / (cur_img_p.stem + ".txt")
                     if src_lbl.exists():
@@ -249,15 +273,24 @@ def main() -> int:
                     cur_img = Image.open(cur_img_p).convert("RGB")
                     gray_u8 = np.array(cur_img.convert("L"), dtype=np.uint8)
 
+                    if args.save_rgb:
+                        cur_img.save(out_rgb_p)
+
+                    if args.image_mode == "rgb":
+                        cur_img.save(out_img_p)
+
                     if prev_img_p is None:
                         u8 = np.full_like(gray_u8, 128, dtype=np.uint8)
                         v8 = np.full_like(gray_u8, 128, dtype=np.uint8)
                         attn = np.zeros_like(gray_u8, dtype=np.float32)
-                        if args.no_attn:
-                            merged = _merge_no_attn(gray_u8, u8, v8)
-                        else:
-                            merged = _apply_attn(gray_u8, u8, v8, attn, float(args.alpha))
-                        Image.fromarray(merged).save(out_img_p)
+                        if args.image_mode != "rgb":
+                            if args.no_attn:
+                                merged = _merge_no_attn(gray_u8, u8, v8)
+                            else:
+                                merged = _apply_attn(gray_u8, u8, v8, attn, float(args.alpha))
+                            Image.fromarray(merged).save(out_img_p)
+                        if args.save_motion:
+                            Image.fromarray(_merge_motion(u8, v8, attn)).save(out_motion_p)
                         prev_img_p = cur_img_p
                         prev_idx = cur_idx
                         continue
@@ -306,7 +339,11 @@ def main() -> int:
                         merged = _merge_no_attn(gray_u8, u8, v8)
                     else:
                         merged = _apply_attn(gray_u8, u8, v8, attn, float(args.alpha))
-                    Image.fromarray(merged).save(out_img_p)
+                    if args.image_mode != "rgb":
+                        Image.fromarray(merged).save(out_img_p)
+
+                    if args.save_motion:
+                        Image.fromarray(_merge_motion(u8, v8, attn)).save(out_motion_p)
 
                     prev_img_p = cur_img_p
                     prev_idx = cur_idx
