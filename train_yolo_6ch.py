@@ -240,6 +240,9 @@ def _expand_first_conv_model(model, in_ch: int = 6) -> None:
     else:
         raise RuntimeError("Unsupported model structure for first-conv replacement")
 
+    if hasattr(model, "yaml") and isinstance(getattr(model, "yaml"), dict):
+        model.yaml["ch"] = in_ch
+
 
 def _patch_detection_trainer_get_model(in_ch: int = 6) -> None:
     # Patch the actual trainer model instance created inside Ultralytics.
