@@ -39,15 +39,31 @@ def _quantile_or_max(x: torch.Tensor, q: float) -> float:
         return float(x.max().item())
 
 
-def _compute_attn_mag(flow: torch.Tensor, q: float) -> torch.Tensor:
+def _compute_attn_mag(flow: torch.Tensor, q: float, *, gamma: float = 1.0, t0: float = 0.0) -> torch.Tensor:
     u = flow[0]
     v = flow[1]
     mag = torch.sqrt(u * u + v * v)
     mag_scale = max(_quantile_or_max(mag, q), 1e-6)
-    return (mag / mag_scale).clamp(0.0, 1.0)
+    a = (mag / mag_scale).clamp(0.0, 1.0)
+    t0 = float(t0)
+    if t0 > 0.0:
+        t0 = min(t0, 0.999)
+        a = ((a - t0) / (1.0 - t0)).clamp(0.0, 1.0)
+    gamma = float(gamma)
+    if gamma != 1.0:
+        a = a.clamp(0.0, 1.0).pow(gamma)
+    return a
 
 
-def _compute_attn_coherence_gate(flow: torch.Tensor, q: float, *, coh_tau: float, coh_k: float) -> torch.Tensor:
+def _compute_attn_coherence_gate(
+    flow: torch.Tensor,
+    q: float,
+    *,
+    coh_tau: float,
+    coh_k: float,
+    mag_gamma: float = 1.0,
+    mag_t0: float = 0.0,
+) -> torch.Tensor:
     u = flow[0:1]
     v = flow[1:2]
 
@@ -63,7 +79,7 @@ def _compute_attn_coherence_gate(flow: torch.Tensor, q: float, *, coh_tau: float
     cos = cos.clamp(-1.0, 1.0)
 
     gate = torch.sigmoid((cos - float(coh_tau)) * float(coh_k))
-    saliency = _compute_attn_mag(flow, q=q).unsqueeze(0)
+    saliency = _compute_attn_mag(flow, q=q, gamma=mag_gamma, t0=mag_t0).unsqueeze(0)
     return (saliency * gate).squeeze(0).clamp(0.0, 1.0)
 
 
@@ -74,6 +90,9 @@ def _flow_to_uint8(
     attn_mode: str = "mag",
     coh_tau: float = 0.2,
     coh_k: float = 5.0,
+    attn_q: float | None = None,
+    attn_gamma: float = 1.0,
+    attn_t0: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     # flow: [2, H, W] on CPU
     u = flow[0]
@@ -87,10 +106,19 @@ def _flow_to_uint8(
     u8 = (u01 * 255.0).round().clamp(0.0, 255.0).to(torch.uint8).cpu().numpy()
     v8 = (v01 * 255.0).round().clamp(0.0, 255.0).to(torch.uint8).cpu().numpy()
 
+    q_attn = float(attn_q) if attn_q is not None else float(q)
+
     if attn_mode == "mag":
-        attn_t = _compute_attn_mag(flow, q=q)
+        attn_t = _compute_attn_mag(flow, q=q_attn, gamma=attn_gamma, t0=attn_t0)
     elif attn_mode == "coh":
-        attn_t = _compute_attn_coherence_gate(flow, q=q, coh_tau=coh_tau, coh_k=coh_k)
+        attn_t = _compute_attn_coherence_gate(
+            flow,
+            q=q_attn,
+            coh_tau=coh_tau,
+            coh_k=coh_k,
+            mag_gamma=attn_gamma,
+            mag_t0=attn_t0,
+        )
     else:
         raise ValueError(f"Unknown attn_mode: {attn_mode}")
 
@@ -154,6 +182,9 @@ def main() -> int:
     ap.add_argument("--device", type=str, default="cuda")
     ap.add_argument("--alpha", type=float, default=1.0)
     ap.add_argument("--flow_q", type=float, default=0.99)
+    ap.add_argument("--attn_q", type=float, default=None)
+    ap.add_argument("--attn_gamma", type=float, default=1.0)
+    ap.add_argument("--attn_t0", type=float, default=0.0)
     ap.add_argument("--no_attn", action="store_true")
     ap.add_argument("--normalize_dt", action="store_true")
     ap.add_argument("--attn_mode", type=str, default="mag", choices=["mag", "coh"])
@@ -257,6 +288,9 @@ def main() -> int:
                         attn_mode=str(args.attn_mode),
                         coh_tau=float(args.coh_tau),
                         coh_k=float(args.coh_k),
+                        attn_q=args.attn_q,
+                        attn_gamma=float(args.attn_gamma),
+                        attn_t0=float(args.attn_t0),
                     )
                     if args.no_attn:
                         merged = _merge_no_attn(gray_u8, u8, v8)
