@@ -93,6 +93,7 @@ def _flow_to_uint8(
     attn_q: float | None = None,
     attn_gamma: float = 1.0,
     attn_t0: float = 0.0,
+    attn_blur: int = 0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     # flow: [2, H, W] on CPU
     u = flow[0]
@@ -121,6 +122,13 @@ def _flow_to_uint8(
         )
     else:
         raise ValueError(f"Unknown attn_mode: {attn_mode}")
+
+    k = int(attn_blur)
+    if k > 0:
+        if k % 2 == 0:
+            k += 1
+        attn_t = F.avg_pool2d(attn_t.unsqueeze(0).unsqueeze(0), kernel_size=k, stride=1, padding=k // 2).squeeze(0).squeeze(0)
+        attn_t = attn_t.clamp(0.0, 1.0)
 
     attn = attn_t.cpu().numpy().astype(np.float32)
 
@@ -185,6 +193,7 @@ def main() -> int:
     ap.add_argument("--attn_q", type=float, default=None)
     ap.add_argument("--attn_gamma", type=float, default=1.0)
     ap.add_argument("--attn_t0", type=float, default=0.0)
+    ap.add_argument("--attn_blur", type=int, default=0)
     ap.add_argument("--no_attn", action="store_true")
     ap.add_argument("--normalize_dt", action="store_true")
     ap.add_argument("--attn_mode", type=str, default="mag", choices=["mag", "coh"])
@@ -291,6 +300,7 @@ def main() -> int:
                         attn_q=args.attn_q,
                         attn_gamma=float(args.attn_gamma),
                         attn_t0=float(args.attn_t0),
+                        attn_blur=int(args.attn_blur),
                     )
                     if args.no_attn:
                         merged = _merge_no_attn(gray_u8, u8, v8)
