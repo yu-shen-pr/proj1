@@ -114,29 +114,28 @@ def _expand_first_conv_inplace(yolo, in_ch: int = 6) -> None:
 
     root = yolo.model
 
-    target_name = None
-    target_conv = None
-    for name, m in root.named_modules():
-        if isinstance(m, nn.Conv2d) and int(m.in_channels) == 3:
-            target_name = name
-            target_conv = m
-            break
+    # Prefer the canonical location for Ultralytics DetectionModel: root.model[0] is the first Conv wrapper
+    old = None
+    wrapper = None
+    if hasattr(root, "model"):
+        m0 = getattr(root, "model")
+        try:
+            wrapper = m0[0]
+            if hasattr(wrapper, "conv") and isinstance(wrapper.conv, nn.Conv2d):
+                old = wrapper.conv
+        except Exception:
+            old = None
 
-    if target_name is None or target_conv is None:
+    # Fallback: locate first Conv2d by module traversal
+    if old is None:
+        for _, m in root.named_modules():
+            if isinstance(m, nn.Conv2d) and int(m.in_channels) == 3:
+                old = m
+                break
+
+    if old is None:
         raise RuntimeError("Failed to locate the first Conv2d with in_channels=3")
 
-    parent = root
-    attr = target_name
-    if "." in target_name:
-        parts = target_name.split(".")
-        attr = parts[-1]
-        for p in parts[:-1]:
-            if p.isdigit():
-                parent = parent[int(p)]
-            else:
-                parent = getattr(parent, p)
-
-    old = target_conv
     new = nn.Conv2d(
         in_channels=in_ch,
         out_channels=old.out_channels,
@@ -159,7 +158,31 @@ def _expand_first_conv_inplace(yolo, in_ch: int = 6) -> None:
         if old.bias is not None and new.bias is not None:
             new.bias.copy_(old.bias)
 
-    setattr(parent, attr, new)
+    # Write back
+    if wrapper is not None and hasattr(wrapper, "conv"):
+        wrapper.conv = new
+        if hasattr(wrapper, "c1"):
+            wrapper.c1 = in_ch
+    else:
+        # last-resort: replace by name path
+        target_name = None
+        for name, m in root.named_modules():
+            if m is old:
+                target_name = name
+                break
+        if not target_name:
+            raise RuntimeError("Failed to resolve module path for first conv")
+        parent = root
+        attr = target_name
+        if "." in target_name:
+            parts = target_name.split(".")
+            attr = parts[-1]
+            for p in parts[:-1]:
+                if p.isdigit():
+                    parent = parent[int(p)]
+                else:
+                    parent = getattr(parent, p)
+        setattr(parent, attr, new)
 
     if hasattr(root, "yaml") and isinstance(root.yaml, dict):
         root.yaml["ch"] = in_ch
@@ -191,6 +214,15 @@ def main() -> int:
     yolo = YOLO(args.model)
     _expand_first_conv_inplace(yolo, in_ch=6)
 
+    # Sanity check before trainer potentially touches anything
+    try:
+        first = yolo.model.model[0].conv
+        print(f"[6CH] first conv in_channels={getattr(first, 'in_channels', None)}")
+        if int(getattr(first, "in_channels", 0)) != 6:
+            raise RuntimeError("First conv is not 6ch after patch")
+    except Exception as e:
+        raise RuntimeError(f"Failed to verify 6ch first conv: {e}")
+
     imgsz = _parse_imgsz(args.imgsz)
 
     yolo.train(
@@ -203,6 +235,7 @@ def main() -> int:
         device=str(args.device),
         project=str(args.project),
         name=str(args.name),
+        pretrained=False,
         hsv_h=0.0,
         hsv_s=0.0,
         hsv_v=0.0,
