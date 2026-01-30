@@ -188,6 +188,85 @@ def _expand_first_conv_inplace(yolo, in_ch: int = 6) -> None:
         root.yaml["ch"] = in_ch
 
 
+def _expand_first_conv_model(model, in_ch: int = 6) -> None:
+    import torch
+    import torch.nn as nn
+
+    wrapper = None
+    old = None
+    if hasattr(model, "model"):
+        try:
+            wrapper = model.model[0]
+            if hasattr(wrapper, "conv") and isinstance(wrapper.conv, nn.Conv2d):
+                old = wrapper.conv
+        except Exception:
+            old = None
+
+    if old is None:
+        for _, m in model.named_modules():
+            if isinstance(m, nn.Conv2d) and int(m.in_channels) == 3:
+                old = m
+                break
+
+    if old is None:
+        raise RuntimeError("Failed to locate first conv in trainer model")
+
+    new = nn.Conv2d(
+        in_channels=in_ch,
+        out_channels=old.out_channels,
+        kernel_size=old.kernel_size,
+        stride=old.stride,
+        padding=old.padding,
+        dilation=old.dilation,
+        groups=old.groups,
+        bias=(old.bias is not None),
+        padding_mode=old.padding_mode,
+    )
+
+    with torch.no_grad():
+        new.weight.zero_()
+        new.weight[:, : old.in_channels].copy_(old.weight)
+        if in_ch > old.in_channels:
+            mean_w = old.weight.mean(dim=1, keepdim=True)
+            rep = in_ch - old.in_channels
+            new.weight[:, old.in_channels :].copy_(mean_w.repeat(1, rep, 1, 1))
+        if old.bias is not None and new.bias is not None:
+            new.bias.copy_(old.bias)
+
+    if wrapper is not None and hasattr(wrapper, "conv"):
+        wrapper.conv = new
+        if hasattr(wrapper, "c1"):
+            wrapper.c1 = in_ch
+    else:
+        raise RuntimeError("Unsupported model structure for first-conv replacement")
+
+
+def _patch_detection_trainer_get_model(in_ch: int = 6) -> None:
+    # Patch the actual trainer model instance created inside Ultralytics.
+    try:
+        from ultralytics.models.yolo.detect.train import DetectionTrainer  # type: ignore
+    except Exception as e:
+        raise RuntimeError(f"Failed to import DetectionTrainer: {e}")
+
+    if getattr(DetectionTrainer, "_sixch_patched", False):
+        return
+
+    orig_get_model = DetectionTrainer.get_model
+
+    def get_model(self, cfg=None, weights=None, verbose=True):  # type: ignore
+        m = orig_get_model(self, cfg=cfg, weights=weights, verbose=verbose)
+        _expand_first_conv_model(m, in_ch=in_ch)
+        try:
+            first = m.model[0].conv
+            print(f"[6CH] trainer model first conv in_channels={int(first.in_channels)}")
+        except Exception:
+            pass
+        return m
+
+    DetectionTrainer.get_model = get_model  # type: ignore
+    DetectionTrainer._sixch_patched = True  # type: ignore
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", type=str, default="")
@@ -208,20 +287,13 @@ def main() -> int:
         raise SystemExit("Missing --data")
 
     _patch_yolodataset_for_motion(motion_dirname=args.motion_dirname)
+    _patch_detection_trainer_get_model(in_ch=6)
 
     from ultralytics import YOLO
 
     yolo = YOLO(args.model)
-    _expand_first_conv_inplace(yolo, in_ch=6)
-
-    # Sanity check before trainer potentially touches anything
-    try:
-        first = yolo.model.model[0].conv
-        print(f"[6CH] first conv in_channels={getattr(first, 'in_channels', None)}")
-        if int(getattr(first, "in_channels", 0)) != 6:
-            raise RuntimeError("First conv is not 6ch after patch")
-    except Exception as e:
-        raise RuntimeError(f"Failed to verify 6ch first conv: {e}")
+    # Note: Ultralytics trainer builds its own model instance. We patch DetectionTrainer.get_model
+    # to ensure the model used for training is converted to 6ch.
 
     imgsz = _parse_imgsz(args.imgsz)
 
