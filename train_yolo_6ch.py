@@ -270,6 +270,61 @@ def _patch_detection_trainer_get_model(in_ch: int = 6) -> None:
     DetectionTrainer._sixch_patched = True  # type: ignore
 
 
+def _patch_base_trainer_hooks(in_ch: int = 6) -> None:
+    """Patch BaseTrainer so the *actual* model instance used during training becomes 6ch.
+
+    Ultralytics may use task-specific Trainer subclasses that override get_model or build the model
+    inside setup_model. This function patches the common base hooks to be resilient.
+    """
+
+    try:
+        from ultralytics.engine.trainer import BaseTrainer  # type: ignore
+    except Exception as e:
+        raise RuntimeError(f"Failed to import BaseTrainer: {e}")
+
+    if not getattr(BaseTrainer, "_sixch_patched", False):
+        # Patch get_model
+        if hasattr(BaseTrainer, "get_model"):
+            orig_get_model = BaseTrainer.get_model
+
+            def get_model(self, cfg=None, weights=None, verbose=True):  # type: ignore
+                m = orig_get_model(self, cfg=cfg, weights=weights, verbose=verbose)
+                try:
+                    _expand_first_conv_model(m, in_ch=in_ch)
+                except Exception:
+                    # Some tasks may not use this model format; ignore
+                    pass
+                return m
+
+            BaseTrainer.get_model = get_model  # type: ignore
+
+        # Patch setup_model/_setup_model to post-fix self.model if Trainer bypasses get_model
+        for hook_name in ("_setup_model", "setup_model"):
+            if hasattr(BaseTrainer, hook_name):
+                orig_hook = getattr(BaseTrainer, hook_name)
+
+                def _wrap(h):
+                    def wrapped(self, *args, **kwargs):  # type: ignore
+                        out = h(self, *args, **kwargs)
+                        try:
+                            if hasattr(self, "model") and self.model is not None:
+                                _expand_first_conv_model(self.model, in_ch=in_ch)
+                                try:
+                                    first = self.model.model[0].conv
+                                    print(f"[6CH] trainer model first conv in_channels={int(first.in_channels)}")
+                                except Exception:
+                                    print("[6CH] trainer model patched")
+                        except Exception:
+                            pass
+                        return out
+
+                    return wrapped
+
+                setattr(BaseTrainer, hook_name, _wrap(orig_hook))
+
+        BaseTrainer._sixch_patched = True  # type: ignore
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", type=str, default="")
@@ -290,7 +345,9 @@ def main() -> int:
         raise SystemExit("Missing --data")
 
     _patch_yolodataset_for_motion(motion_dirname=args.motion_dirname)
+    # Patch trainers at multiple hook points for robustness on Ultralytics 8.4.8
     _patch_detection_trainer_get_model(in_ch=6)
+    _patch_base_trainer_hooks(in_ch=6)
 
     from ultralytics import YOLO
 
