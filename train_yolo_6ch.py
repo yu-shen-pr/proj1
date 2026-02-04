@@ -136,6 +136,9 @@ def _expand_first_conv_inplace(yolo, in_ch: int = 6) -> None:
     if old is None:
         raise RuntimeError("Failed to locate the first Conv2d with in_channels=3")
 
+    if int(old.in_channels) == int(in_ch):
+        return
+
     new = nn.Conv2d(
         in_channels=in_ch,
         out_channels=old.out_channels,
@@ -210,6 +213,9 @@ def _expand_first_conv_model(model, in_ch: int = 6) -> None:
 
     if old is None:
         raise RuntimeError("Failed to locate first conv in trainer model")
+
+    if int(old.in_channels) == int(in_ch):
+        return
 
     new = nn.Conv2d(
         in_channels=in_ch,
