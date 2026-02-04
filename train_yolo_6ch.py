@@ -372,6 +372,7 @@ def main() -> int:
     ap.add_argument("--project", type=str, default="runs_paperlike")
     ap.add_argument("--name", type=str, default="exp_6ch")
     ap.add_argument("--motion_dirname", type=str, default="motion_images")
+    ap.add_argument("--val_only", action="store_true")
     args, unknown = ap.parse_known_args()
     _apply_kv_overrides(args, unknown)
 
@@ -391,6 +392,17 @@ def main() -> int:
     # to ensure the model used for training is converted to 6ch.
 
     imgsz = _parse_imgsz(args.imgsz)
+
+    if bool(args.val_only):
+        yolo.val(
+            data=args.data,
+            imgsz=imgsz,
+            batch=int(args.batch),
+            device=str(args.device),
+            project=str(args.project),
+            name=str(args.name),
+        )
+        return 0
 
     yolo.train(
         data=args.data,
