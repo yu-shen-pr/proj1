@@ -48,21 +48,21 @@ def _patch_validator_warmup_channels_dynamic() -> None:
             except Exception:
                 pass
 
+            ins: list[int] = []
             best = None
             for mod in root.modules():
                 if not isinstance(mod, torch.nn.Conv2d):
                     continue
+                ins.append(int(mod.in_channels))
                 k = getattr(mod, "kernel_size", None)
                 ks = tuple(int(x) for x in k) if isinstance(k, tuple) else None
                 cand = (int(mod.out_channels), int(mod.in_channels), ks)
                 if cand[0] == 16 and cand[2] == (3, 3):
-                    return int(mod.in_channels)
-                if best is None:
                     best = cand
-                else:
-                    # Prefer smaller out_channels as proxy for early layer
-                    if cand[0] < best[0]:
-                        best = cand
+            if ins:
+                mn = int(min(ins))
+                if mn in (3, 6):
+                    return mn
             if best is not None:
                 return int(best[1])
             return None
