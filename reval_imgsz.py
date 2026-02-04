@@ -164,6 +164,66 @@ def _restore_yolodataset_load_image() -> None:
     YOLODataset.load_image = orig  # type: ignore
 
 
+def _temporary_patch_check_det_dataset_channels(in_ch: int) -> None:
+    """Force Ultralytics detection dataset metadata channels for warmup."""
+
+    try:
+        from ultralytics.data import utils as data_utils  # type: ignore
+    except Exception:
+        return
+
+    if not hasattr(data_utils, "check_det_dataset"):
+        return
+
+    if not hasattr(data_utils, "_reval_orig_check_det_dataset"):
+        data_utils._reval_orig_check_det_dataset = data_utils.check_det_dataset  # type: ignore
+
+    orig = data_utils._reval_orig_check_det_dataset  # type: ignore
+
+    def check_det_dataset(*args, **kwargs):  # type: ignore
+        d = orig(*args, **kwargs)
+        try:
+            if isinstance(d, dict):
+                d["channels"] = int(in_ch)
+        except Exception:
+            pass
+        return d
+
+    data_utils.check_det_dataset = check_det_dataset  # type: ignore
+
+    # Also patch any modules that imported the function by value
+    try:
+        from ultralytics.engine import validator as engine_validator  # type: ignore
+
+        if hasattr(engine_validator, "check_det_dataset"):
+            if not hasattr(engine_validator, "_reval_orig_check_det_dataset"):
+                engine_validator._reval_orig_check_det_dataset = engine_validator.check_det_dataset  # type: ignore
+            engine_validator.check_det_dataset = check_det_dataset  # type: ignore
+    except Exception:
+        pass
+
+
+def _restore_check_det_dataset() -> None:
+    try:
+        from ultralytics.data import utils as data_utils  # type: ignore
+    except Exception:
+        data_utils = None
+
+    if data_utils is not None:
+        orig = getattr(data_utils, "_reval_orig_check_det_dataset", None)
+        if orig is not None:
+            data_utils.check_det_dataset = orig  # type: ignore
+
+    try:
+        from ultralytics.engine import validator as engine_validator  # type: ignore
+
+        orig2 = getattr(engine_validator, "_reval_orig_check_det_dataset", None)
+        if orig2 is not None:
+            engine_validator.check_det_dataset = orig2  # type: ignore
+    except Exception:
+        pass
+
+
 def _parse_imgsz(s: str) -> Any:
     s = str(s).strip()
     if not s:
@@ -362,8 +422,10 @@ def main() -> int:
         ch = ch_model if ch_model is not None else ch_pt
         if ch == 6:
             _ensure_6ch_patches(motion_dirname=str(args.motion_dirname))
+            _temporary_patch_check_det_dataset_channels(6)
         else:
             _restore_yolodataset_load_image()
+            _restore_check_det_dataset()
 
         err = ""
         out = None
@@ -382,6 +444,7 @@ def main() -> int:
         finally:
             if ch == 6:
                 _restore_yolodataset_load_image()
+                _restore_check_det_dataset()
 
         m = _extract_metrics(out) if out is not None else {"P": None, "R": None, "mAP50": None, "mAP50-95": None}
         inf_ms = _extract_speed_ms(out) if out is not None else None
