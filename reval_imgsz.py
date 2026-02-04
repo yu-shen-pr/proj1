@@ -22,6 +22,114 @@ def _infer_channels_from_loaded_model(yolo: Any) -> Optional[int]:
         return None
 
 
+def _patch_validator_warmup_channels_dynamic() -> None:
+    try:
+        from ultralytics.engine.validator import BaseValidator  # type: ignore
+    except Exception:
+        return
+
+    if getattr(BaseValidator, "_reval_dyn_ch_patched", False):
+        return
+
+    orig_call = BaseValidator.__call__
+
+    def __call__(self, *args, **kwargs):  # type: ignore
+        model = kwargs.get("model", None)
+        if model is None and len(args) >= 1:
+            model = args[0]
+        try:
+            ch = None
+            if model is not None:
+                import torch
+
+                for mod in model.modules():
+                    if isinstance(mod, torch.nn.Conv2d):
+                        ch = int(mod.in_channels)
+                        break
+            if ch is not None and hasattr(self, "data") and isinstance(self.data, dict):
+                self.data["channels"] = int(ch)
+        except Exception:
+            pass
+        return orig_call(self, *args, **kwargs)
+
+    BaseValidator.__call__ = __call__  # type: ignore
+    BaseValidator._reval_dyn_ch_patched = True  # type: ignore
+
+
+def _temporary_patch_yolodataset_load_image_for_6ch(motion_dirname: str = "motion_images") -> None:
+    try:
+        from ultralytics.data.dataset import YOLODataset  # type: ignore
+    except Exception:
+        return
+
+    if not hasattr(YOLODataset, "_reval_orig_load_image"):
+        YOLODataset._reval_orig_load_image = YOLODataset.load_image  # type: ignore
+
+    orig_load_image = YOLODataset._reval_orig_load_image  # type: ignore
+
+    def _motion_path_from_image_path(img_path: str) -> str:
+        p = img_path.replace("\\", os.sep).replace("/", os.sep)
+        token = os.sep + "images" + os.sep
+        if token in p:
+            p = p.replace(token, os.sep + motion_dirname + os.sep, 1)
+        else:
+            parts = p.split(os.sep)
+            for i in range(len(parts) - 1):
+                if parts[i] == "images":
+                    parts[i] = motion_dirname
+                    p = os.sep.join(parts)
+                    break
+        return p
+
+    def load_image_6ch(self, i: int, *args, **kwargs):  # type: ignore
+        out = orig_load_image(self, i, *args, **kwargs)
+        if isinstance(out, tuple) and len(out) >= 1:
+            im = out[0]
+        else:
+            im = out
+
+        img_path = self.im_files[i]
+        motion_path = _motion_path_from_image_path(img_path)
+
+        import cv2
+        import numpy as np
+
+        motion = cv2.imread(motion_path, cv2.IMREAD_UNCHANGED)
+        if motion is None:
+            motion = np.zeros((im.shape[0], im.shape[1], 3), dtype=im.dtype)
+        else:
+            if motion.ndim == 2:
+                motion = np.stack([motion, motion, motion], axis=-1)
+            if motion.shape[0] != im.shape[0] or motion.shape[1] != im.shape[1]:
+                motion = cv2.resize(motion, (im.shape[1], im.shape[0]), interpolation=cv2.INTER_LINEAR)
+            if motion.shape[2] > 3:
+                motion = motion[:, :, :3]
+            if motion.shape[2] == 1:
+                motion = np.repeat(motion, 3, axis=2)
+
+        im6 = np.concatenate([im, motion], axis=2)
+
+        if isinstance(out, tuple) and len(out) >= 1:
+            out = (im6,) + out[1:]
+        else:
+            out = im6
+        return out
+
+    YOLODataset.load_image = load_image_6ch  # type: ignore
+
+
+def _restore_yolodataset_load_image() -> None:
+    try:
+        from ultralytics.data.dataset import YOLODataset  # type: ignore
+    except Exception:
+        return
+
+    orig = getattr(YOLODataset, "_reval_orig_load_image", None)
+    if orig is None:
+        return
+    YOLODataset.load_image = orig  # type: ignore
+
+
 def _parse_imgsz(s: str) -> Any:
     s = str(s).strip()
     if not s:
@@ -100,11 +208,7 @@ def _infer_channels_from_pt(best_pt: str) -> Optional[int]:
 
 
 def _ensure_6ch_patches(motion_dirname: str = "motion_images") -> None:
-    import train_yolo_6ch as t6
-
-    t6._patch_yolodataset_for_motion(motion_dirname=motion_dirname)
-    t6._patch_check_det_dataset_channels(in_ch=6)
-    t6._patch_validator_warmup_channels(in_ch=6)
+    _temporary_patch_yolodataset_load_image_for_6ch(motion_dirname=motion_dirname)
 
 
 def _extract_metrics(val_out: Any) -> dict[str, Optional[float]]:
@@ -202,6 +306,8 @@ def main() -> int:
 
     from ultralytics import YOLO
 
+    _patch_validator_warmup_channels_dynamic()
+
     run_dirs = _find_run_dirs(runs_dir)
     if args.filter:
         run_dirs = [d for d in run_dirs if args.filter in d]
@@ -222,6 +328,8 @@ def main() -> int:
         ch = ch_model if ch_model is not None else ch_pt
         if ch == 6:
             _ensure_6ch_patches(motion_dirname=str(args.motion_dirname))
+        else:
+            _restore_yolodataset_load_image()
 
         err = ""
         out = None
@@ -237,6 +345,9 @@ def main() -> int:
             )
         except Exception as e:
             err = f"{type(e).__name__}: {e}"
+        finally:
+            if ch == 6:
+                _restore_yolodataset_load_image()
 
         m = _extract_metrics(out) if out is not None else {"P": None, "R": None, "mAP50": None, "mAP50-95": None}
         inf_ms = _extract_speed_ms(out) if out is not None else None
