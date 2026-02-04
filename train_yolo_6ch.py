@@ -407,6 +407,7 @@ def main() -> int:
     ap.add_argument("--name", type=str, default="exp_6ch")
     ap.add_argument("--motion_dirname", type=str, default="motion_images")
     ap.add_argument("--val_only", action="store_true")
+    ap.add_argument("--resume", action="store_true")
     args, unknown = ap.parse_known_args()
     _apply_kv_overrides(args, unknown)
 
@@ -450,6 +451,7 @@ def main() -> int:
         project=str(args.project),
         name=str(args.name),
         pretrained=False,
+        resume=bool(args.resume),
         hsv_h=0.0,
         hsv_s=0.0,
         hsv_v=0.0,
