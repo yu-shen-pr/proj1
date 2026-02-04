@@ -6,6 +6,22 @@ from datetime import datetime
 from typing import Any, Optional
 
 
+def _infer_channels_from_loaded_model(yolo: Any) -> Optional[int]:
+    try:
+        import torch
+
+        m = getattr(yolo, "model", None)
+        if m is None:
+            return None
+
+        for mod in m.modules():
+            if isinstance(mod, torch.nn.Conv2d):
+                return int(mod.in_channels)
+        return None
+    except Exception:
+        return None
+
+
 def _parse_imgsz(s: str) -> Any:
     s = str(s).strip()
     if not s:
@@ -140,7 +156,9 @@ class ReValRow:
     best_pt: str
     data: str
     channels: Optional[int]
+    model_in_channels: Optional[int]
     imgsz: str
+    rect: bool
     batch: int
     device: str
     P: Optional[float]
@@ -148,6 +166,7 @@ class ReValRow:
     mAP50: Optional[float]
     mAP50_95: Optional[float]
     inf_ms: Optional[float]
+    error: str
 
 
 def _find_run_dirs(runs_dir: str) -> list[str]:
@@ -172,6 +191,15 @@ def main() -> int:
     runs_dir = os.path.abspath(args.runs_dir)
     imgsz_obj = _parse_imgsz(args.imgsz)
 
+    rect = False
+    val_imgsz: Any = imgsz_obj
+    if isinstance(imgsz_obj, list) and len(imgsz_obj) == 2:
+        rect = True
+        try:
+            val_imgsz = int(max(int(imgsz_obj[0]), int(imgsz_obj[1])))
+        except Exception:
+            val_imgsz = 640
+
     from ultralytics import YOLO
 
     run_dirs = _find_run_dirs(runs_dir)
@@ -188,22 +216,30 @@ def main() -> int:
         if not data:
             continue
 
-        ch = _infer_channels_from_pt(best_pt)
+        yolo = YOLO(best_pt)
+        ch_pt = _infer_channels_from_pt(best_pt)
+        ch_model = _infer_channels_from_loaded_model(yolo)
+        ch = ch_model if ch_model is not None else ch_pt
         if ch == 6:
             _ensure_6ch_patches(motion_dirname=str(args.motion_dirname))
 
-        yolo = YOLO(best_pt)
-        out = yolo.val(
-            data=data,
-            imgsz=imgsz_obj,
-            batch=int(args.batch),
-            device=str(args.device),
-            project="reval",
-            name=os.path.basename(rd.rstrip(os.sep)),
-        )
+        err = ""
+        out = None
+        try:
+            out = yolo.val(
+                data=data,
+                imgsz=val_imgsz,
+                rect=bool(rect),
+                batch=int(args.batch),
+                device=str(args.device),
+                project="reval",
+                name=os.path.basename(rd.rstrip(os.sep)),
+            )
+        except Exception as e:
+            err = f"{type(e).__name__}: {e}"
 
-        m = _extract_metrics(out)
-        inf_ms = _extract_speed_ms(out)
+        m = _extract_metrics(out) if out is not None else {"P": None, "R": None, "mAP50": None, "mAP50-95": None}
+        inf_ms = _extract_speed_ms(out) if out is not None else None
 
         rows.append(
             ReValRow(
@@ -212,7 +248,9 @@ def main() -> int:
                 best_pt=best_pt,
                 data=data,
                 channels=ch,
+                model_in_channels=ch_model,
                 imgsz=str(args.imgsz),
+                rect=bool(rect),
                 batch=int(args.batch),
                 device=str(args.device),
                 P=m.get("P"),
@@ -220,6 +258,7 @@ def main() -> int:
                 mAP50=m.get("mAP50"),
                 mAP50_95=m.get("mAP50-95"),
                 inf_ms=inf_ms,
+                error=err,
             )
         )
 
