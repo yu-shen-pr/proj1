@@ -358,6 +358,40 @@ def _patch_check_det_dataset_channels(in_ch: int = 6) -> None:
     data_utils.check_det_dataset = check_det_dataset  # type: ignore
     data_utils._sixch_channels_patched = True  # type: ignore
 
+    # Also patch any modules that imported the function by value (e.g. `from ... import check_det_dataset`)
+    try:
+        from ultralytics.engine import validator as engine_validator  # type: ignore
+
+        if hasattr(engine_validator, "check_det_dataset"):
+            engine_validator.check_det_dataset = check_det_dataset  # type: ignore
+    except Exception:
+        pass
+
+
+def _patch_validator_warmup_channels(in_ch: int = 6) -> None:
+    """Final safety net: force validator warmup to use 6 channels."""
+
+    try:
+        from ultralytics.engine.validator import BaseValidator  # type: ignore
+    except Exception as e:
+        raise RuntimeError(f"Failed to import BaseValidator: {e}")
+
+    if getattr(BaseValidator, "_sixch_patched", False):
+        return
+
+    orig_call = BaseValidator.__call__
+
+    def __call__(self, *args, **kwargs):  # type: ignore
+        try:
+            if hasattr(self, "data") and isinstance(self.data, dict):
+                self.data["channels"] = int(in_ch)
+        except Exception:
+            pass
+        return orig_call(self, *args, **kwargs)
+
+    BaseValidator.__call__ = __call__  # type: ignore
+    BaseValidator._sixch_patched = True  # type: ignore
+
 
 def main() -> int:
     ap = argparse.ArgumentParser()
@@ -384,6 +418,7 @@ def main() -> int:
     _patch_detection_trainer_get_model(in_ch=6)
     _patch_base_trainer_hooks(in_ch=6)
     _patch_check_det_dataset_channels(in_ch=6)
+    _patch_validator_warmup_channels(in_ch=6)
 
     from ultralytics import YOLO
 
