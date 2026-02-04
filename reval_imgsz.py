@@ -28,6 +28,47 @@ def _patch_validator_warmup_channels_dynamic() -> None:
     except Exception:
         return
 
+    def _infer_warmup_channels_from_model(model: Any) -> Optional[int]:
+        try:
+            import torch
+
+            # AutoBackend wraps the real model under `.model`
+            root = getattr(model, "model", None)
+            if root is None:
+                root = model
+
+            # Ultralytics DetectionModel keeps layers in `root.model` (list/ModuleList)
+            mm = getattr(root, "model", None)
+            try:
+                if mm is not None and hasattr(mm, "__getitem__"):
+                    m0 = mm[0]
+                    conv = getattr(m0, "conv", None)
+                    if isinstance(conv, torch.nn.Conv2d):
+                        return int(conv.in_channels)
+            except Exception:
+                pass
+
+            best = None
+            for mod in root.modules():
+                if not isinstance(mod, torch.nn.Conv2d):
+                    continue
+                k = getattr(mod, "kernel_size", None)
+                ks = tuple(int(x) for x in k) if isinstance(k, tuple) else None
+                cand = (int(mod.out_channels), int(mod.in_channels), ks)
+                if cand[0] == 16 and cand[2] == (3, 3):
+                    return int(mod.in_channels)
+                if best is None:
+                    best = cand
+                else:
+                    # Prefer smaller out_channels as proxy for early layer
+                    if cand[0] < best[0]:
+                        best = cand
+            if best is not None:
+                return int(best[1])
+            return None
+        except Exception:
+            return None
+
     if getattr(BaseValidator, "_reval_dyn_ch_patched", False):
         return
 
@@ -38,14 +79,7 @@ def _patch_validator_warmup_channels_dynamic() -> None:
         if model is None and len(args) >= 1:
             model = args[0]
         try:
-            ch = None
-            if model is not None:
-                import torch
-
-                for mod in model.modules():
-                    if isinstance(mod, torch.nn.Conv2d):
-                        ch = int(mod.in_channels)
-                        break
+            ch = _infer_warmup_channels_from_model(model) if model is not None else None
             if ch is not None and hasattr(self, "data") and isinstance(self.data, dict):
                 self.data["channels"] = int(ch)
         except Exception:
