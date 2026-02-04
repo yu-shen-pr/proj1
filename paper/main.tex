@@ -1,0 +1,180 @@
+\documentclass[10pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{array}
+\usepackage{caption}
+\usepackage{subcaption}
+
+\title{Motion-Augmented YOLO for Robust Detection: RAFT-Derived Flow Attention and Multi-Channel Fusion (Draft)}
+\author{Anonymous Authors}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We study how motion cues derived from optical flow can improve a YOLO-based detector used in a frame-dynamics tracking pipeline. While incorporating deep optical flow (RAFT) and attention often improves motion sensitivity, we observe consistent degradation in detection metrics when motion features replace appearance cues or when attention saturates. To address this, we propose a robust attention mapping for flow magnitude, optional spatial smoothing, and a multi-channel fusion scheme that preserves RGB information by concatenating appearance and motion features into a 6-channel input. Our ongoing ablations suggest that preserving appearance through bypass/skip fusion is critical for recovering mAP50-95. We provide an end-to-end data generation and training pipeline compatible with Ultralytics YOLO and outline a rigorous experimental protocol. (This manuscript is a draft; some ablation results are pending and indicated as placeholders.)
+\end{abstract}
+
+\section{Introduction}
+Motion is an important cue for detection under blur, illumination change, and low texture. In tracking-by-detection settings, stable detection performance across frame dynamics is essential. A natural approach is to augment a detector with optical flow features. However, naively injecting flow or attention can reduce accuracy by destroying appearance information or introducing noisy, poorly normalized signals.
+
+This paper investigates why RAFT-based motion augmentation decreases mAP in practice and proposes a set of engineering and modeling choices to stabilize training. Our primary goal is to improve mAP50-95 without sacrificing mAP50, precision, recall, or runtime.
+
+\paragraph{Contributions.}
+\begin{enumerate}
+  \item A robust flow-magnitude attention mapping that reduces saturation and improves stability via tunable nonlinearity and thresholding.
+  \item An optional spatial smoothing mechanism for attention to suppress high-frequency artifacts.
+  \item A 6-channel fusion scheme (RGB + motion features) that preserves appearance cues and is compatible with pretrained YOLO weights via first-layer expansion.
+  \item A reproducible training pipeline for Ultralytics YOLO, including trainer/dataloader patches for multi-channel inputs.
+\end{enumerate}
+
+\section{Related Work}
+\paragraph{Optical flow for recognition.}
+Optical flow has long been used as a motion descriptor. Recent deep flow methods, such as RAFT, provide high-quality dense flow but may introduce domain mismatch and scaling issues.
+
+\paragraph{Motion attention and gating.}
+Attention masks can emphasize motion saliency; however, overly aggressive masks can discard appearance details that are crucial for small objects and fine-grained categories.
+
+\paragraph{Multi-modal fusion in detectors.}
+Concatenation-based fusion is simple and effective, but training stability depends on normalization, augmentations, and initialization.
+
+\section{Method}
+\subsection{Flow Extraction}
+Given two frames $I_{t-\Delta t}$ and $I_t$, we compute dense optical flow $F_t = (u_t, v_t)$ using RAFT. We optionally apply frame-interval normalization to make motion magnitude comparable across variable sampling intervals:
+\begin{equation}
+\tilde{F}_t = \frac{F_t}{\Delta t}.
+\end{equation}
+Here, $\Delta t$ is the frame index gap between the paired images used for flow.
+
+\subsection{Magnitude-Based Motion Attention}
+We compute flow magnitude $m_t = \sqrt{u_t^2 + v_t^2}$. To reduce attention saturation and maintain sensitivity to small motions, we use a robust attention mapping with three parameters:
+\begin{equation}
+ a_t = \sigma\left(\gamma \cdot (\mathrm{QuantileNorm}(m_t; q) - t_0)\right),
+\end{equation}
+where $q$ is a magnitude quantile used for normalization, $\gamma$ controls sharpness, and $t_0$ is a threshold offset. $\sigma$ denotes a bounded squashing function (e.g., logistic).
+
+\subsection{Spatial Smoothing}
+We optionally smooth $a_t$ using average pooling with kernel size $k$ to reduce high-frequency artifacts:
+\begin{equation}
+ \bar{a}_t = \mathrm{AvgPool}(a_t; k).
+\end{equation}
+
+\subsection{6-Channel Fusion: Preserving RGB}
+A key observation from our preliminary experiments is that replacing RGB with motion features can degrade detection. We therefore keep RGB and fuse motion by concatenation:
+\begin{equation}
+ X_t = \mathrm{Concat}(I_t^{RGB},\; \phi(u_t),\; \phi(v_t),\; \psi(\bar{a}_t)) \in \mathbb{R}^{H\times W\times 6},
+\end{equation}
+where $\phi(\cdot)$ and $\psi(\cdot)$ are feature encodings into image-like channels (e.g., scaled to 8-bit for storage or normalized to $[0,1]$ for training).
+
+\subsection{Compatibility with Pretrained YOLO}
+To use pretrained YOLO weights, we expand the first convolution from 3 to 6 input channels. Let the original weights be $W \in \mathbb{R}^{C_{out}\times 3\times k\times k}$. We create $W' \in \mathbb{R}^{C_{out}\times 6\times k\times k}$ by copying RGB weights to the first three channels and initializing the remaining three motion channels (e.g., small random init or scaled copy). This preserves the benefit of pretrained appearance features while allowing motion learning.
+
+\section{Implementation}
+\subsection{Dataset Generation}
+We generate aligned RGB and motion images per frame:
+\begin{itemize}
+  \item \texttt{images/}: RGB images $I_t$.
+  \item \texttt{motion\_images/}: encoded $(u,v,a)$ triplets.
+  \item \texttt{labels/}: YOLO-format annotations.
+\end{itemize}
+
+\subsection{Training with Ultralytics YOLO}
+Ultralytics YOLO expects 3-channel images by default. We implement a training wrapper that:
+\begin{itemize}
+  \item patches the dataloader to load both \texttt{images/} and \texttt{motion\_images/} and concatenate them into 6 channels;
+  \item disables HSV augmentation to avoid corrupting motion channels;
+  \item patches the trainer model-construction hooks so the actual training model uses the expanded 6-channel first layer.
+\end{itemize}
+
+\section{Experimental Setup}
+\subsection{Data Splits}
+We follow the project-provided fold generation protocol (e.g., similarity-based grouping) and evaluate on consistent folds. Unless stated otherwise, all ablations share identical train/val splits.
+
+\subsection{Metrics}
+We report precision (P), recall (R), mAP50, and mAP50-95. We also track runtime for (i) flow generation and (ii) training/inference throughput.
+
+\subsection{Baselines and Variants}
+\begin{itemize}
+  \item \textbf{Raw RGB}: standard YOLO trained on RGB.
+  \item \textbf{3ch Merge}: motion features merged into a 3-channel representation (prior approach).
+  \item \textbf{6ch RGB+Motion}: proposed concatenation fusion.
+  \item \textbf{Attention Ablations}: varying $(q,\gamma,t_0)$ and blur kernel $k$.
+  \item \textbf{dt Normalization}: with/without $\Delta t$ normalization; (planned) confidence-weighted $\Delta t$.
+\end{itemize}
+
+\section{Results}
+\subsection{Main Quantitative Results (Placeholder)}
+Table~\ref{tab:main} summarizes the main results. Pending experiments are marked as TODO.
+
+\begin{table}[t]
+\centering
+\caption{Main results (placeholders). Replace TODO entries with measured values.}
+\label{tab:main}
+\begin{tabular}{lcccc}
+\toprule
+Method & P & R & mAP50 & mAP50-95 \\
+\midrule
+Raw RGB baseline & TODO & TODO & TODO & TODO \\
+3ch Merge (RAFT+attn) & TODO & TODO & TODO & TODO \\
+6ch RGB+Motion (ours) & TODO & TODO & TODO & TODO \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Ablation Study (Placeholder)}
+\begin{table}[t]
+\centering
+\caption{Ablations on attention mapping and smoothing (placeholders).}
+\label{tab:ablation}
+\begin{tabular}{lcccc}
+\toprule
+Variant & (q, $\gamma$, $t_0$) & blur $k$ & mAP50 & mAP50-95 \\
+\midrule
+A0 & TODO & TODO & TODO & TODO \\
+A1 & TODO & TODO & TODO & TODO \\
+A2 & TODO & TODO & TODO & TODO \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Qualitative Results (Placeholder Figures)}
+Figure~\ref{fig:qual} is a placeholder. Replace with qualitative visualizations (e.g., detection overlays, failure cases).
+
+\begin{figure}[t]
+\centering
+\fbox{\parbox[c][2.2in][c]{0.9\linewidth}{\centering \textbf{Placeholder figure.}\\
+Insert qualitative comparisons here (RGB vs motion-augmented vs 6ch fusion).}}
+\caption{Qualitative examples (placeholder).}
+\label{fig:qual}
+\end{figure}
+
+\section{Discussion}
+\paragraph{Why naive motion hurts.}
+Our working explanation is that aggressive attention or motion-only representations discard appearance cues needed for classification/localization. Flow magnitude also exhibits heavy-tailed distributions; without robust mapping, attention saturates and training becomes unstable.
+
+\paragraph{Why 6ch helps.}
+Concatenation preserves RGB and lets the network learn how to use motion adaptively. Pretrained initialization remains effective when only the first layer is expanded carefully.
+
+\section{Limitations and Future Work}
+Several key ablations are ongoing:
+\begin{itemize}
+  \item Multi-seed and multi-fold significance tests.
+  \item Pareto evaluation including speed/wall-clock cost.
+  \item Confidence-weighted $\Delta t$ normalization and reliability-aware gating.
+  \item More expressive fusion modules (skip/bypass, residual blending, dual-branch backbones).
+\end{itemize}
+
+\section{Conclusion}
+We present a practical motion-augmented YOLO pipeline using RAFT flow and robust attention mapping. Our current evidence indicates that preserving RGB via 6-channel fusion is essential to recover and potentially surpass baseline mAP50-95. This draft will be updated with complete ablation results.
+
+\begin{thebibliography}{9}
+\bibitem{raft} RAFT: Recurrent All-Pairs Field Transforms for Optical Flow. (Placeholder citation.)
+\bibitem{yolo} Ultralytics YOLO. (Placeholder citation.)
+\end{thebibliography}
+
+\end{document}

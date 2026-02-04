@@ -325,6 +325,40 @@ def _patch_base_trainer_hooks(in_ch: int = 6) -> None:
         BaseTrainer._sixch_patched = True  # type: ignore
 
 
+def _patch_check_det_dataset_channels(in_ch: int = 6) -> None:
+    """Force Ultralytics detection dataset metadata channels to match our 6ch input.
+
+    Without this, validator warmup uses self.data['channels'] (defaults to 3) to build a dummy
+    tensor and will crash when the model first conv expects 6 channels.
+    """
+
+    try:
+        from ultralytics.data import utils as data_utils  # type: ignore
+    except Exception as e:
+        raise RuntimeError(f"Failed to import ultralytics.data.utils: {e}")
+
+    if getattr(data_utils, "_sixch_channels_patched", False):
+        return
+
+    if not hasattr(data_utils, "check_det_dataset"):
+        return
+
+    orig = data_utils.check_det_dataset
+
+    def check_det_dataset(*args, **kwargs):  # type: ignore
+        d = orig(*args, **kwargs)
+        try:
+            if isinstance(d, dict):
+                d["channels"] = int(in_ch)
+                print(f"[6CH] dataset channels={int(in_ch)}")
+        except Exception:
+            pass
+        return d
+
+    data_utils.check_det_dataset = check_det_dataset  # type: ignore
+    data_utils._sixch_channels_patched = True  # type: ignore
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", type=str, default="")
@@ -348,6 +382,7 @@ def main() -> int:
     # Patch trainers at multiple hook points for robustness on Ultralytics 8.4.8
     _patch_detection_trainer_get_model(in_ch=6)
     _patch_base_trainer_hooks(in_ch=6)
+    _patch_check_det_dataset_channels(in_ch=6)
 
     from ultralytics import YOLO
 

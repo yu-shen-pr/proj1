@@ -1,0 +1,68 @@
+Project: YOLO Ablation — RAFT Optical Flow & Attention Tuning (Frame-Dynamics Detector as Tracker)
+
+1) Goal
+- Improve detection quality (especially mAP50-95) when adding motion cues (optical flow + attention) to a YOLO detector used in a tracking-style pipeline.
+- Identify why earlier RAFT+attention decreased mAP and design fixes (sampling, dt normalization, attention mapping, and fusion strategies).
+
+2) Baseline & Problem Statement
+- Baseline: “Raw” RGB-only YOLO training (original project setting).
+- Observed issue: naive RAFT+attention/3-channel merge can hurt mAP50 and/or mAP50-95.
+- Working hypothesis: motion-only or aggressive attention can destroy appearance cues; also flow magnitude scaling and frame-interval (dt) handling can destabilize training.
+
+3) Key Ideas Implemented So Far
+A. Robust magnitude-attention mapping
+- Added non-linear and thresholded attention mapping parameters:
+  - attn_q, attn_gamma, attn_t0
+- Purpose: prevent attention saturation; stabilize gradients and preserve small motions.
+
+B. Spatial smoothing of attention
+- Added attn_blur option (avg-pooling blur on attention mask).
+- Purpose: reduce noise / high-frequency artifacts in attention.
+
+C. Output RGB + motion separately for multi-channel fusion (6ch)
+- 6-channel input design: RGB (3) + motion features (u,v,attn) (3) => 6ch.
+- Motivation: keep original appearance information instead of replacing it.
+
+4) Code Changes (Main Files)
+A. Data/gen_raft_flow_attn.py
+- Added/extended CLI flags to support:
+  - image_mode=rgb: save RGB images into images/ (match Ultralytics label conventions)
+  - save_motion: save (u,v,attn) motion images into motion_images/
+  - robust attention mapping (attn_q/attn_gamma/attn_t0)
+  - attention blur (attn_blur)
+- Resulting dataset layout (typical):
+  - images/xxxx.jpg (RGB)
+  - motion_images/xxxx.jpg (3ch motion proxy encoding u,v,attn)
+  - labels/xxxx.txt
+
+B. train_yolo_6ch.py
+- Purpose: train Ultralytics YOLO (v8.4.8) with 6-channel inputs.
+- Main mechanisms:
+  - Monkeypatch Ultralytics dataset to load RGB + motion_images, concatenate to 6ch.
+  - Expand first conv layer from 3->6 channels:
+    - copy pretrained RGB weights to first 3 channels
+    - initialize extra channels for motion (controlled init)
+  - Disable HSV augmentation to avoid corrupting motion channels.
+  - Monkeypatch Trainer hooks (DetectionTrainer + BaseTrainer) to ensure the actual training model uses 6ch.
+
+5) Current Status
+- 6ch data generation path is implemented.
+- 6ch training script implemented and iteratively patched to handle Ultralytics trainer rebuilding behavior.
+- Latest patch: also hooks BaseTrainer get_model/setup_model to enforce 6ch on the actual self.model used during training.
+- Pending: verify on AutoDL that training starts successfully with model summary showing Conv [6,16,3,2] and epoch 0 runs.
+
+6) Experiments & Ablations (In Progress)
+- Attention modes: magnitude attention, coherence gating (AAG-related exploration), and smoothing.
+- dt normalization variants and potential confidence-weighted dt (planned).
+- Fusion strategies:
+  - keep-RGB skip/bypass (in progress)
+  - 6ch two-stream concatenation (implemented; verification pending)
+
+7) Immediate Next Steps
+- Verify 6ch training launch on AutoDL:
+  - confirm print: [6CH] trainer model first conv in_channels=6
+  - confirm model summary first layer is Conv [6,16,3,2]
+- Run controlled comparisons on same split/seed:
+  - Raw RGB baseline vs 3ch merged vs 6ch (RGB+motion)
+  - Evaluate P/R/mAP50/mAP50-95 (+ speed)
+- Finish ablation table and select the best Pareto model.
