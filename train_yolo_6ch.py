@@ -404,6 +404,7 @@ def main() -> int:
     ap.add_argument("--data", type=str, default="")
     ap.add_argument("--model", type=str, default="yolo11n.pt")
     ap.add_argument("--imgsz", type=str, default="640")
+    ap.add_argument("--rect", action="store_true")
     ap.add_argument("--epochs", type=int, default=50)
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--optimizer", type=str, default="SGD")
@@ -434,11 +435,19 @@ def main() -> int:
     # to ensure the model used for training is converted to 6ch.
 
     imgsz = _parse_imgsz(args.imgsz)
+    rect = bool(args.rect)
+    if isinstance(imgsz, list) and len(imgsz) == 2:
+        rect = True
+        try:
+            imgsz = int(max(int(imgsz[0]), int(imgsz[1])))
+        except Exception:
+            imgsz = 640
 
     if bool(args.val_only):
         yolo.val(
             data=args.data,
             imgsz=imgsz,
+            rect=rect,
             batch=int(args.batch),
             device=str(args.device),
             project=str(args.project),
@@ -449,6 +458,7 @@ def main() -> int:
     yolo.train(
         data=args.data,
         imgsz=imgsz,
+        rect=rect,
         epochs=int(args.epochs),
         batch=int(args.batch),
         optimizer=str(args.optimizer),
