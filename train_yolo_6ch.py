@@ -415,6 +415,7 @@ def main() -> int:
     ap.add_argument("--motion_dirname", type=str, default="motion_images")
     ap.add_argument("--val_only", action="store_true")
     ap.add_argument("--resume", action="store_true")
+    ap.add_argument("--no_pretrained", action="store_true")
     args, unknown = ap.parse_known_args()
     _apply_kv_overrides(args, unknown)
 
@@ -466,11 +467,13 @@ def main() -> int:
         device=str(args.device),
         project=str(args.project),
         name=str(args.name),
-        pretrained=False,
+        pretrained=(not bool(args.no_pretrained)),
         resume=bool(args.resume),
         hsv_h=0.0,
         hsv_s=0.0,
         hsv_v=0.0,
+        auto_augment=None,
+        erasing=0.0,
     )
     return 0
 
