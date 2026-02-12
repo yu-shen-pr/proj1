@@ -6,6 +6,12 @@ from datetime import datetime
 from typing import Any, Optional
 
 
+def _read_csv_rows(path: str) -> list[dict[str, str]]:
+    with open(path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        return list(reader)
+
+
 def _try_import_yaml():
     try:
         import yaml  # type: ignore
@@ -13,6 +19,46 @@ def _try_import_yaml():
         return yaml
     except Exception:
         return None
+
+
+def _read_reval_metrics(reval_csv: str) -> dict[str, dict[str, Any]]:
+    """Read unified re-validation CSV produced by reval_imgsz.py.
+
+    Returns mapping: run_name -> {P, R, mAP50, mAP50_95, imgsz, rect, batch, device, inf_ms, error}
+    """
+
+    if not reval_csv or not os.path.isfile(reval_csv):
+        return {}
+
+    rows = _read_csv_rows(reval_csv)
+    if not rows:
+        return {}
+
+    def pick(d: dict[str, str], *keys: str) -> str:
+        for k in keys:
+            if k in d and str(d.get(k, "")).strip() != "":
+                return str(d.get(k, ""))
+        return ""
+
+    out: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        run_name = pick(r, "run_name", "name", "Run")
+        if not run_name:
+            continue
+
+        out[run_name] = {
+            "P": _safe_float(pick(r, "P", "p")),
+            "R": _safe_float(pick(r, "R", "r")),
+            "mAP50": _safe_float(pick(r, "mAP50", "map50")),
+            "mAP50_95": _safe_float(pick(r, "mAP50_95", "mAP50-95", "map50_95", "map50-95")),
+            "imgsz": pick(r, "imgsz"),
+            "rect": pick(r, "rect"),
+            "batch": pick(r, "batch"),
+            "device": pick(r, "device"),
+            "inf_ms": _safe_float(pick(r, "inf_ms", "inference_ms", "speed")),
+            "error": pick(r, "error"),
+        }
+    return out
 
 
 def _read_yaml(path: str) -> dict[str, Any]:
@@ -27,6 +73,7 @@ def _read_yaml(path: str) -> dict[str, Any]:
                 k, v = line.split(":", 1)
                 out[k.strip()] = v.strip().strip("'\"")
         return out
+
     with open(path, "r", encoding="utf-8") as f:
         d = y.safe_load(f)
     return d if isinstance(d, dict) else {}
@@ -66,9 +113,7 @@ def _detect_metric_columns(header: list[str]) -> dict[str, str]:
 
 
 def _read_best_metrics_from_results_csv(path: str) -> dict[str, Optional[float]]:
-    with open(path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
+    rows = _read_csv_rows(path)
     if not rows:
         return {"P": None, "R": None, "mAP50": None, "mAP50-95": None}
 
@@ -229,10 +274,14 @@ def main() -> int:
     ap.add_argument("--runs_dir", type=str, default="runs")
     ap.add_argument("--out_dir", type=str, default="result_summary")
     ap.add_argument("--filter", type=str, default="")
+    ap.add_argument("--reval_csv", type=str, default="")
+    ap.add_argument("--display_imgsz", type=str, default="")
     args = ap.parse_args()
 
     runs_dir = os.path.abspath(args.runs_dir)
     run_dirs = _find_runs(runs_dir)
+
+    reval_map = _read_reval_metrics(str(args.reval_csv)) if args.reval_csv else {}
 
     rows: list[RunSummary] = []
     for rd in run_dirs:
@@ -240,6 +289,18 @@ def main() -> int:
             continue
         s = _summarize_one(rd)
         if s is not None:
+            # Prefer unified re-validation metrics if provided
+            if s.run_name in reval_map:
+                rv = reval_map[s.run_name]
+                s.P = rv.get("P") if rv.get("P") is not None else s.P
+                s.R = rv.get("R") if rv.get("R") is not None else s.R
+                s.mAP50 = rv.get("mAP50") if rv.get("mAP50") is not None else s.mAP50
+                s.mAP50_95 = rv.get("mAP50_95") if rv.get("mAP50_95") is not None else s.mAP50_95
+                if rv.get("imgsz"):
+                    s.imgsz = rv.get("imgsz")
+
+            if args.display_imgsz:
+                s.imgsz = str(args.display_imgsz)
             rows.append(s)
 
     rows.sort(key=lambda r: (r.project, r.run_name))
