@@ -9,26 +9,40 @@ venv*/
 .venv_py310/
 tracker_env/
 .venv/
+pip_tmp/
 
 # training outputs
+runs/
 runs*/
 wandb/
 
-latex.txt
-
 # experiment csv outputs
 result/
+*.json
 
-# raw dataset (too large for GitHub)
+# raw dataset and generated data (too large for GitHub)
 Data/train/
+Data/yolo_fold*/
+Data/best_folds/*.txt
 
 # weights / exports
 *.pt
 *.onnx
 *.engine
 
+# large image files (generated figures)
+*.png
+*.pdf
+*.jpg
+*.jpeg
+
 # OS / IDE
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
+
+# keep specific important files
+!README.md
+!requirements.txt
+!latex.txt
