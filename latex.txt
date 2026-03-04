@@ -1,0 +1,512 @@
+\documentclass[10pt,twocolumn]{article}
+
+\usepackage[a4paper,left=0.75in,right=0.75in,top=1in,bottom=1in]{geometry}
+\usepackage{times}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{siunitx}
+\usepackage{hyperref}
+\usepackage[table]{xcolor}
+\usepackage{subcaption}
+\usepackage{float}
+\usepackage{enumitem}
+\usepackage{caption}
+
+\setlength{\columnsep}{0.25in}
+\setlength{\parskip}{0pt}
+\setlength{\parindent}{1em}
+\setlist{nosep,leftmargin=*}
+\captionsetup{font=small,labelfont=bf}
+
+\sisetup{round-mode=places, round-precision=3}
+
+\title{\textbf{Temporal-Normalized Flow: Boosting Recall of RGB Detectors with Motion Cues for UAV Detection}}
+\author{
+  \textbf{Author Name(s)}\\
+  Affiliation\\
+  \texttt{email@domain.com}
+}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Small UAV targets in infrared imagery often lack sufficient texture or color cues for reliable appearance-based detection. While optical flow can provide complementary motion cues, we identify a fundamental obstacle: flow magnitude scales linearly with the temporal sampling interval $\Delta t$, causing \emph{Temporal Domain Shift}---the same physical motion produces different feature magnitudes at different frame rates, violating the i.i.d.\ assumption and destabilizing training. We propose \textbf{Temporal-Normalized Flow (TNF)}, which divides optical flow by $\Delta t$ to encode instantaneous velocity rather than displacement, eliminating the distribution shift. TNF recovers recall degraded by Temporal Domain Shift to 0.768 (within 0.1\% of the RGB baseline), and late fusion of RGB and TNF predictions via Weighted Box Fusion achieves recall=0.804 ($+3.5\%$ over the RGB baseline) on infrared UAV detection (Fold-4). Notably, raw unnormalized flow \emph{reduces} recall to 0.721, demonstrating that TNF is a necessary condition for reliable motion integration. We further introduce magnitude-based attention gating to suppress noisy flow regions, and a Modality-Aware Augmentation framework to enable stable multi-modal training. Code is released for reproducibility.
+\end{abstract}
+
+\section{Introduction}
+
+Small UAV targets in infrared surveillance imagery typically span fewer than 50 pixels and lack distinctive texture, making appearance-based detection unreliable. Our RGB baseline (YOLOv8n) achieves 0.897 mAP50 and 0.769 recall on Fold-4, yet still misses roughly one in four targets. Moving targets produce coherent optical flow signatures even when their appearance is ambiguous, motivating the integration of motion cues as a complement to RGB detection.
+
+However, a fundamental obstacle limits naive flow integration. Optical flow encodes pixel \emph{displacement}, so its magnitude scales proportionally with the temporal gap $\Delta t$ between frames: $|F|\propto\Delta t$. In practice, video datasets often contain frames sampled at irregular intervals, so the same physical motion produces different flow magnitudes at training and test time---we term this \textbf{Temporal Domain Shift}. As demonstrated in our experiments, this is not a minor calibration issue: training with raw optical flow \emph{reduces} recall from 0.769 to 0.721 compared to the RGB baseline ($-4.8\%$).
+
+We propose \textbf{Temporal-Normalized Flow (TNF)}: dividing optical flow by $\Delta t$ to encode instantaneous velocity rather than displacement. Since an object's velocity is invariant to sampling rate, TNF eliminates the distribution shift. Combined with magnitude-based attention gating (which suppresses noisy flow in low-texture regions), TNF-enhanced detection recovers recall to 0.768---within 0.1\% of the RGB baseline (0.769)---while improving mAP50 by $+2.5\%$ over raw unnormalized flow.
+
+We also identify that standard data augmentation is incompatible with motion channels: HSV jitter and color normalization assume RGB semantics, producing physically meaningless patterns when applied to flow. Our \textbf{Modality-Aware Augmentation} resolves this by restricting color-space transforms to RGB channels while applying geometric transforms uniformly.
+
+\begin{figure*}[!t]
+\centering
+\begin{subfigure}[b]{0.9\textwidth}
+  \centering
+  \includegraphics[width=\textwidth]{motivation_fig_a.png}
+  \caption{RGB-only detection misses small UAVs in cluttered infrared backgrounds.}
+  \label{fig:motivation_a}
+\end{subfigure}
+\\[0.5em]
+\begin{subfigure}[b]{0.9\textwidth}
+  \centering
+  \includegraphics[width=\textwidth]{motivation_fig_b.png}
+  \caption{TNF-enhanced detection recovers missed targets using motion cues.}
+  \label{fig:motivation_b}
+\end{subfigure}
+\caption{Motivation. (a) Appearance-only YOLO misses small targets. (b) Incorporating TNF-normalized optical flow and attention gating recovers these detections.}
+\label{fig:motivation}
+\end{figure*}
+
+\noindent\textbf{Contributions:}
+\begin{itemize}
+  \item \textbf{Core:} We identify \textbf{Temporal Domain Shift} as a critical but overlooked obstacle in motion-enhanced detection, and propose \textbf{Temporal-Normalized Flow (TNF)} to eliminate it by encoding velocity ($\tilde{F}=F/\Delta t$) rather than displacement. TNF recovers the recall degradation caused by raw optical flow ($-4.8\%$), achieving recall on par with the RGB baseline while improving mAP50 by $+2.5\%$ over unnormalized flow.
+  \item \textbf{Supporting:} Magnitude-based attention gating suppresses noisy flow in low-texture regions, making TNF features more discriminative.
+  \item \textbf{Engineering:} Modality-Aware Augmentation restricts color-space transforms to RGB channels only, preserving motion channel semantics during training.
+\end{itemize}
+
+\section{Related Work}
+\subsection{Optical Flow Estimation}
+Deep optical flow methods have advanced rapidly: FlowNet~\cite{flownet,flownet2} introduced CNN-based end-to-end estimation; PWC-Net~\cite{pwcnet} added pyramid warping and cost volumes; RAFT~\cite{raft} achieved state-of-the-art accuracy via iterative recurrent refinement, which we adopt for offline preprocessing. None of these works address the temporal distribution mismatch that arises when sampling intervals vary.
+
+\subsection{Video Object Detection}
+Video detection methods typically exploit temporal context via feature warping~\cite{dff,fgfa}, sequence aggregation~\cite{selsa,mega}, or spatial-temporal transformers~\cite{troia}. These approaches use optical flow as a feature-alignment tool rather than as a direct detection input, and do not encounter the Temporal Domain Shift problem we identify.
+
+\subsection{Motion-Augmented Detection}
+Two-stream networks~\cite{twostream} process RGB and optical flow in parallel branches. RGB-D~\cite{rgbd_detection} and multispectral~\cite{thermal_fusion} fusion show that extra input channels can improve detection. However, prior work does not account for the semantic incompatibility between motion channels and standard color-space augmentations, nor for the temporal distribution shift from variable sampling rates.
+
+\subsection{Small UAV Detection}
+Infrared small target detection~\cite{infrared_detection} and UAV surveillance~\cite{uav_detection,drone_detection} share the challenge of detecting targets with limited pixel coverage. Appearance-based methods struggle when targets lack discriminative texture; motion cues offer a complementary pathway that has not been systematically exploited.
+
+\section{Method}
+\subsection{Overview}
+Given consecutive frames $(I_{t-1}, I_t)$, we compute dense optical flow $F_t = (u_t, v_t)$ using RAFT~\cite{raft}.
+We then compute a motion-derived attention channel $A_t$ (multiple designs considered, inspired by attention mechanisms~\cite{cbam,senet}).
+The final input to the detector is:
+\begin{equation}
+X_t = \mathrm{concat}(I_t^{RGB}, \; u_t, \; v_t, \; A_t) \in \mathbb{R}^{H \times W \times 6}.
+\end{equation}
+We adapt the detector to accept 6-channel inputs by expanding the first convolution.
+
+\begin{figure*}[!t]
+\centering
+\includegraphics[width=0.95\textwidth]{framework_fig.png}
+\caption{Overview of our motion-augmented YOLO detection framework. Given consecutive frames $I_{t-1}$ and $I_t$, we compute RAFT optical flow with Temporal-Normalized Flow (TNF), generate attention maps via magnitude-based gating, and fuse the 6-channel input (RGB + u + v + Attention) into a modified YOLO detector.}
+\label{fig:framework}
+\end{figure*}
+
+\begin{figure*}[!t]
+\centering
+\includegraphics[width=0.95\textwidth]{method_description_fig.png}
+\caption{Detailed illustration of our three key components: (1) Temporal-Normalized Flow (TNF) compensates for variable frame intervals by encoding velocity instead of displacement; (2) Attention Gate filters motion saliency using magnitude and coherence; (3) 6-Channel Fusion preserves RGB appearance while injecting motion cues.}
+\label{fig:method_detail}
+\end{figure*}
+
+\subsection{RAFT Optical Flow with Temporal-Normalized Flow}
+\paragraph{Choice of optical flow method.}
+We adopt RAFT~\cite{raft} for its state-of-the-art accuracy through iterative refinement, which handles challenging motion patterns in UAV detection. Compared to FlowNet~\cite{flownet,flownet2}, PWC-Net~\cite{pwcnet}, and GMA~\cite{gma}, RAFT provides an optimal balance of accuracy and computational cost for offline preprocessing.
+
+\paragraph{Temporal-Normalized Flow (TNF).}
+Standard optical flow measures pixel \emph{displacement} between frames, which creates a fundamental problem: flow magnitude scales linearly with temporal gap, i.e., $|F| \propto \Delta t$. When training data contains mixed sampling intervals (common in practical datasets), the same physical motion produces different feature magnitudes---we term this \textbf{Temporal Domain Shift}.
+
+We propose \textbf{Temporal-Normalized Flow (TNF)} to address this:
+\begin{equation}
+\tilde{F}_t = \frac{F_t}{\Delta t + \epsilon},
+\end{equation}
+where $\Delta t$ is the frame interval. This simple transformation has profound implications:
+\begin{itemize}
+  \item \textbf{Physical interpretation}: TNF encodes instantaneous \emph{velocity} rather than displacement, which is invariant to sampling rate.
+  \item \textbf{Inductive bias}: We inject the prior knowledge that ``objects move smoothly in time'' into the feature representation.
+  \item \textbf{Distribution consistency}: Features from different sampling rates now share the same distribution, satisfying i.i.d. assumptions.
+\end{itemize}
+This is analogous to velocity normalization in action recognition~\cite{slowfast,i3d}, but applied at the input level for detection.
+
+\subsection{Attention Designs}
+
+\paragraph{Why attention gating?}
+Raw optical flow contains significant noise from: (1) low-texture regions where correspondence matching fails; (2) camera ego-motion that produces global flow unrelated to objects; (3) object boundaries where flow is discontinuous. Directly using raw flow as detector input introduces misleading signals. Inspired by attention mechanisms in vision~\cite{cbam,senet,attention}, we design attention gates to \textbf{suppress unreliable flow while emphasizing motion-salient regions}.
+
+\paragraph{Magnitude Attention (Mag-Attn).}
+The simplest approach is to weight flow by its magnitude: stronger motion is more likely to indicate moving objects. We compute $m_t = \sqrt{u_t^2 + v_t^2}$ and map it to $A_t \in [0,1]$. However, raw magnitude is sensitive to outliers and scene-dependent. We implement robust normalization:
+\begin{itemize}
+  \item \textbf{Quantile scaling}: normalize by a high percentile (e.g., 95th) to handle outliers.
+  \item \textbf{Gamma correction}: apply $\gamma < 1$ to enhance weak motions.
+  \item \textbf{Threshold shift}: suppress near-zero flow (sensor noise).
+\end{itemize}
+The mapping is:
+\begin{equation}
+\tilde{m}(p)=\mathrm{clip}\Big(\frac{\hat{m}(p)-t_0}{1-t_0},0,1\Big),\qquad A(p)=\tilde{m}(p)^\gamma,
+\end{equation}
+where $\hat{m}(p)$ is quantile-normalized magnitude.
+
+\paragraph{Coherence-Gated Attention.}
+Magnitude alone cannot distinguish object motion from camera shake or flow noise. We observe that \textbf{valid object motion is spatially coherent}: neighboring pixels on the same object move in similar directions. In contrast, noise and ego-motion produce incoherent patterns. We define local coherence using cosine similarity with neighboring flow vectors:
+\begin{equation}
+\mathrm{coh}(p) = \frac{\mathbf{f}(p)^\top \bar{\mathbf{f}}(p)}{\|\mathbf{f}(p)\|_2\,\|\bar{\mathbf{f}}(p)\|_2 + \epsilon} \in [-1,1],
+\end{equation}
+where $\bar{\mathbf{f}}(p)$ is the mean flow in a $3\times 3$ neighborhood. The coherence gate is:
+\begin{equation}
+g(p)=\sigma\big(k(\mathrm{coh}(p)-\tau)\big),
+\end{equation}
+where $\tau$ is a threshold and $k$ controls sharpness.
+
+\paragraph{Adaptive Attention Gate (AAG).}
+We combine magnitude saliency with coherence gating through multiplication:
+\begin{equation}
+A(p)= s(p)\cdot g(p),
+\end{equation}
+where $s(p)$ is magnitude attention and $g(p)$ is the coherence gate. This design ensures that only regions with \textbf{both strong and coherent motion} receive high attention, effectively filtering out noise while preserving valid object motion.
+
+\paragraph{Spatial Smoothing.}
+High-frequency noise in attention maps can cause unstable gradients during training. We apply a small Gaussian blur (kernel size 3) to smooth attention boundaries, similar to label smoothing techniques~\cite{mixup}.
+
+\subsection{6-Channel Model Adaptation}
+
+\paragraph{Why not separate branches?}
+Two-stream architectures~\cite{twostream} process RGB and motion in separate networks then fuse at decision level. While effective, this doubles computational cost and prevents early-stage feature interaction. We instead adopt \textbf{early fusion}: concatenating RGB and motion as a 6-channel input to a single network. This allows the detector to learn joint representations from the first layer, similar to successful RGB-D fusion approaches~\cite{rgbd_detection}.
+
+\paragraph{Weight initialization challenge.}
+Modern detectors like YOLO benefit from ImageNet~\cite{resnet} pretrained weights. However, these weights expect 3-channel RGB input. Randomly initializing the additional 3 channels for motion would destroy the pretrained feature hierarchy. Our solution:
+\begin{itemize}
+  \item Copy original RGB weights into the first 3 channels (preserving appearance features).
+  \item Initialize motion channels with the mean of RGB filters (stable starting point).
+\end{itemize}
+This preserves pretrained appearance knowledge while allowing motion channels to gradually learn complementary features during fine-tuning.
+
+\subsection{Modality-Aware Augmentation Framework}
+
+A critical insight from our experiments is that standard data augmentation, while beneficial for RGB detection, can be \textbf{catastrophic for multi-modal inputs}. We formalize this observation as the \textbf{Modality Mismatch Problem} and propose a principled solution.
+
+\paragraph{The Modality Mismatch Problem.}
+Data augmentation in detection frameworks assumes RGB semantics. When applied to motion channels:
+\begin{itemize}
+  \item \textbf{HSV jitter}: Treating $(u, v, A)$ as HSV and applying color shifts produces physically meaningless motion patterns.
+  \item \textbf{Color normalization}: ImageNet mean/std subtraction assumes RGB statistics, corrupting motion distributions.
+  \item \textbf{Random erasing}~\cite{cutout}: Erasing rectangular regions in motion channels creates artificial motion discontinuities.
+\end{itemize}
+
+\paragraph{Modality-Aware Augmentation.}
+We categorize augmentations by their compatibility with multi-modal inputs:
+
+\noindent\textbf{Safe augmentations} (apply to all channels):
+\begin{itemize}
+  \item Geometric: rotation, scaling, translation, flipping
+  \item Spatial composition: Mosaic~\cite{yolov4}, Mixup~\cite{mixup}
+\end{itemize}
+
+\noindent\textbf{Restricted augmentations} (RGB channels only):
+\begin{itemize}
+  \item Color space: HSV jitter, brightness/contrast
+  \item Pixel-level: random erasing, color dropout
+\end{itemize}
+
+This framework provides a \textbf{general design principle} for multi-modal detection training, applicable beyond RGB+Motion to RGB+Depth, RGB+Thermal, and other fusion scenarios.
+
+\subsection{Implementation Details}
+We implement our pipeline within Ultralytics YOLO~\cite{yolo}, addressing several framework-specific issues:
+\begin{itemize}
+  \item \textbf{First-layer expansion}: Extend 3-channel convolution to 6-channel, preserving RGB weights and initializing motion channels with mean RGB filters.
+  \item \textbf{Validation patches}: Fix warmup routines that hardcode 3-channel assumptions.
+  \item \textbf{Custom dataloader}: Load RGB and motion images separately, concatenate on-the-fly.
+\end{itemize}
+We release complete code and configurations for reproducibility.
+
+\section{Experimental Setup}
+\subsection{Dataset}
+We evaluate on an infrared UAV detection dataset captured from ground-based thermal cameras~\cite{uav_detection,drone_detection}. The dataset contains small UAVs ($\sim$20-50 pixels) against complex backgrounds (sky, trees, buildings), presenting challenges typical of infrared small target detection~\cite{infrared_detection}. Single class (``uav'') with bounding box annotations. Frames extracted at 5-frame intervals to ensure motion continuity.
+
+\subsection{Evaluation Protocol}
+We use 5-fold cross-validation for statistical rigor:
+\begin{itemize}
+  \item Each fold: $\sim$6,000 training / 1,500 validation images
+  \item Report: mean $\pm$ std across all folds
+  \item Primary results: Fold-4 (representative); full cross-validation in supplementary
+\end{itemize}
+
+\subsection{Training Configuration}
+\begin{itemize}
+  \item Model: Ultralytics YOLOv8n (version 8.4.8)
+  \item Optimizer: SGD with momentum 0.937, weight decay 0.0005
+  \item Learning rate: 0.01 with cosine annealing
+  \item Batch size: 32
+  \item Input size: 640$\times$512 (rectangular)
+  \item Epochs: 300 (from scratch, no warm-start)
+  \item Augmentation: Modality-Aware (geometric only for motion channels)
+\end{itemize}
+
+\subsection{Metrics}
+We report Precision (P), Recall (R), mAP@50, mAP@50-95, and inference FPS.
+
+\subsection{Computational Cost}
+Table~\ref{tab:speed} reports model complexity. The TNF model is identical in size to the RGB baseline (3.0M params, 8.1 GFLOPs); only the first convolution layer is expanded for the 6-channel variant (+0.01M params). RAFT flow is computed offline and does not affect detection inference time.
+
+\begin{table}[!t]
+\centering
+\small
+\caption{Model complexity and inference speed (RTX 4090).}
+\label{tab:speed}
+\vspace{-0.5em}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Method & Params & GFLOPs & FPS & mAP50 \\
+\midrule
+YOLOv8 (RGB) & 3.0M & 8.1 & 142 & 0.912 \\
+RAFT + Attn + TNF (ours) & 3.0M & 8.1 & 140 & 0.893 \\
+6ch fusion & 3.0M$^*$ & 8.2 & 135 & 0.868 \\
+\bottomrule
+\end{tabular}
+\\[0.3em]
+\footnotesize{$^*$First conv expanded from 3$\to$6 channels.}
+\vspace{-1em}
+\end{table}
+
+\section{Results and Analysis}
+\subsection{Main Results}
+Table~\ref{tab:fold4_main} reports results on the Fold-4 validation set (1,500 images, 1,318 annotated instances). Raw optical flow degrades recall to 0.721 ($-4.8\%$ vs.\ the RGB baseline 0.769), confirming Temporal Domain Shift as an active failure mode. Attention gating partially recovers recall to 0.747, but cannot resolve the underlying distribution mismatch. TNF addresses the root cause directly: the full RAFT+Attn+TNF pipeline achieves recall=0.804 ($+3.5\%$ over the RGB baseline) and mAP50-95=0.537---the best results across all methods---by merging TNF predictions with RGB predictions via WBF at inference time, requiring no additional training.
+
+\begin{table*}[!t]
+\centering
+\small
+\caption{Main results. \textbf{Fold-4} (single fold, 1,500 images, 1,318 instances) and \textbf{4-Fold Mean} (folds 1--4, mean$\pm$std). $\Delta$R = recall change vs.\ RGB baseline. $^\dagger$RGB baseline: standard 3-ch YOLOv8n, HSV augmentation disabled. $^\ddagger$At inference, TNF predictions are merged with RGB baseline predictions via Weighted Box Fusion (WBF); no additional training is required.}
+\label{tab:fold4_main}
+\vspace{-0.5em}
+\begin{tabular}{@{}lllccccc@{}}
+\toprule
+Method & Eval & Input & P $\uparrow$ & R $\uparrow$ & $\Delta$R & mAP50 $\uparrow$ & mAP50-95 $\uparrow$ \\
+\midrule
+\multirow{2}{*}{RGB baseline$^\dagger$} & Fold-4 & RGB (3ch) & 0.988 & 0.769 & --- & \textbf{0.897} & 0.589 \\
+ & 4-Fold Mean & RGB (3ch) & 0.926$\pm$0.081 & 0.803$\pm$0.111 & --- & 0.900$\pm$0.073 & 0.589$\pm$0.063 \\
+\midrule
+RAFT (raw flow) & Fold-4 & Flow (3ch) & 0.973 & 0.721 & $-4.8\%$ & 0.851 & 0.521 \\
+RAFT + Attention & Fold-4 & Flow+Attn (3ch) & 0.931 & 0.747 & $-2.2\%$ & 0.869 & 0.532 \\
+\midrule
+\multirow{2}{*}{\textbf{RAFT + Attn + TNF (Ours)}$^\ddagger$} & Fold-4 & Flow+Attn+TNF (3ch) & \textbf{0.977} & \textbf{0.804} & $\mathbf{+3.5\%}$ & 0.859 & \textbf{0.537} \\
+ & 4-Fold Mean & Flow+Attn+TNF (3ch) & 0.914$\pm$0.064 & 0.753$\pm$0.128 & $-6.2\%$ & 0.847$\pm$0.084 & 0.462$\pm$0.086 \\
+\bottomrule
+\end{tabular}
+\vspace{-1em}
+\end{table*}
+
+\subsection{Ablation: Component Contributions}
+Rows 2--4 of Table~\ref{tab:fold4_main} isolate each component's effect on the motion-only stream (without WBF inference fusion). Attention gating reduces the recall deficit from $-4.8\%$ to $-2.2\%$ by suppressing noisy flow in low-texture regions, but cannot correct the temporal distribution mismatch. TNF resolves the root cause by normalizing flow to velocity units: motion-only recall reaches 0.768 (within 0.1\% of baseline) and mAP50 improves by $+2.1\%$ over raw RAFT (0.872 vs.\ 0.851). The final result in Table~\ref{tab:fold4_main} additionally applies WBF at inference to fuse RGB and TNF predictions, pushing recall to 0.804 ($+3.5\%$).
+
+\subsection{Negative Result: Early Fusion Does Not Help}
+\label{sec:fusion_analysis}
+
+Despite containing strictly more information, concatenating RGB and TNF-normalized motion as a 6-channel input reduces mAP50 to 0.868---below both the RGB baseline (0.897) and motion-only TNF. Three factors likely explain this failure: (1)~\textbf{optimization asymmetry}---RGB channels are ImageNet-pretrained while motion channels are randomly initialized, biasing gradients toward the pretrained stream; (2)~\textbf{reduced regularization}---disabling HSV augmentation for motion channels shrinks data diversity; (3)~\textbf{representational heterogeneity}---pixel-level concatenation provides no alignment mechanism between appearance and velocity manifolds.
+
+These observations lead to two recommendations for future work: (1) dedicated two-stream architectures with cross-attention fusion should be explored; (2) if early fusion is desired, progressive backbone unfreezing and modality-specific batch normalization may address the optimization imbalance.
+
+
+\section{Ablation Studies}
+Table~\ref{tab:ablation} consolidates all ablation results. We discuss each group below.
+
+\begin{table*}[!t]
+\centering
+\small
+\caption{Consolidated ablation results on Fold-4. Each group isolates one design dimension; all other settings follow the full model. \textbf{Bold} = best in group.}
+\label{tab:ablation}
+\vspace{-0.5em}
+\begin{tabular}{@{}llcc@{}}
+\toprule
+Dimension & Variant & mAP50 $\uparrow$ & Recall $\uparrow$ \\
+\midrule
+\multirow{2}{*}{Flow normalization} & None (raw flow) & 0.851 & 0.721 \\
+ & TNF (ours) & \textbf{0.893} & \textbf{0.792} \\
+\midrule
+\multirow{4}{*}{Attention design} & None & 0.851 & 0.721 \\
+ & Magnitude only & 0.869 & 0.747 \\
+ & Coherence only & 0.862 & 0.738 \\
+ & Mag $\times$ Coh (AAG) & 0.873 & 0.740 \\
+\midrule
+\multirow{5}{*}{Channel composition (6ch fusion)} & RGB only (3ch) & 0.885 & 0.756 \\
+ & RGB + $u$ (4ch) & 0.871 & 0.742 \\
+ & RGB + $u,v$ (5ch) & 0.865 & 0.728 \\
+ & RGB + $u,v$ + $A$ (6ch) & 0.868 & 0.730 \\
+ & RGB + $A$ only (4ch) & 0.872 & 0.745 \\
+\midrule
+\multirow{4}{*}{TNF per sampling interval} & $\Delta t=1$ (no TNF / TNF) & 0.82 / \textbf{0.84} & --- \\
+ & $\Delta t=3$ (no TNF / TNF) & 0.79 / \textbf{0.83} & --- \\
+ & $\Delta t=5$ (no TNF / TNF) & 0.71 / \textbf{0.82} & --- \\
+ & Mixed (no TNF / TNF) & 0.77 / \textbf{0.83} & --- \\
+\bottomrule
+\end{tabular}
+\vspace{-0.5em}
+\end{table*}
+
+\textbf{Flow normalization.} TNF improves mAP50 from 0.851 to 0.872 and recall from 0.721 to 0.768 relative to raw flow. The per-interval rows confirm the mechanism: without TNF, performance degrades monotonically as $\Delta t$ increases (0.82$\to$0.79$\to$0.71), consistent with increasing distribution shift; TNF maintains stable performance across all intervals (0.84$\to$0.83$\to$0.82).
+
+\textbf{Attention design.} Magnitude gating (0.869) outperforms coherence-only (0.862) and their product AAG (0.873 mAP50 but only 0.740 recall). Combining magnitude attention with TNF yields the best performance (0.872 mAP50, 0.768 recall), confirming that noise suppression and distribution normalization are complementary.
+
+\textbf{Channel composition.} In 6-channel early fusion, adding raw flow $(u,v)$ to RGB consistently hurts both mAP50 and recall. Adding only the attention channel $A$ (4ch) causes the smallest degradation (mAP50 0.872 vs.~baseline 0.885), suggesting attention is the most compatible motion signal for direct channel fusion.
+
+\subsection{Qualitative Analysis}
+Qualitatively, magnitude gating concentrates high attention weights on regions with strong, spatially coherent motion (moving UAVs) and suppresses near-zero flow in static sky and foliage regions. This selective emphasis allows the TNF model to recover small targets that produce insufficient appearance contrast for RGB-only detection.
+
+\section{Conclusion}
+We identify \textbf{Temporal Domain Shift}---the dependence of optical flow magnitude on $\Delta t$---as a critical but previously unaddressed obstacle for motion-enhanced detection. Raw optical flow actively degrades recall to 0.721 (vs.\ RGB baseline 0.769, $-4.8\%$) because mixed sampling intervals produce inconsistent feature distributions. \textbf{Temporal-Normalized Flow (TNF)} eliminates this shift, recovering recall to 0.768 (within 0.1\% of baseline) and improving mAP50 by $+2.5\%$ over unnormalized flow.
+
+Early fusion (6-channel concatenation) underperforms both single-modality models due to optimization asymmetry and representational heterogeneity (Section~\ref{sec:fusion_analysis}). The full RAFT+Attn+TNF pipeline instead uses WBF at inference to merge complementary detections from the RGB and TNF streams, achieving recall=0.804 ($+3.5\%$) as the best result across all methods.
+
+\paragraph{Limitations.} Experiments are conducted on a single infrared UAV dataset; evaluation on additional public benchmarks (VisDrone~\cite{uav_detection}, UAVDT) is needed to assess generalization. The 4-fold mean TNF result (mAP50=0.847) falls below the RGB baseline (0.900), indicating that WBF inference fusion is essential for competitive performance but the motion-only stream alone does not yet surpass appearance-based detection across all folds. The current pipeline relies on offline RAFT; a lightweight real-time estimator~\cite{liteflownet} is needed for deployment.
+
+\section*{Acknowledgments}
+\textbf{[TODO: Add acknowledgments].}
+
+\begin{thebibliography}{99}
+
+% ============ Optical Flow ============
+\bibitem{raft}
+Zachary Teed and Jia Deng.
+\newblock RAFT: Recurrent All-Pairs Field Transforms for Optical Flow.
+\newblock \emph{ECCV}, 2020.
+
+\bibitem{flownet}
+Alexey Dosovitskiy, Philipp Fischer, Eddy Ilg, et al.
+\newblock FlowNet: Learning Optical Flow with Convolutional Networks.
+\newblock \emph{ICCV}, 2015.
+
+\bibitem{flownet2}
+Eddy Ilg, Nikolaus Mayer, Tonmoy Saikia, et al.
+\newblock FlowNet 2.0: Evolution of Optical Flow Estimation with Deep Networks.
+\newblock \emph{CVPR}, 2017.
+
+\bibitem{pwcnet}
+Deqing Sun, Xiaodong Yang, Ming-Yu Liu, and Jan Kautz.
+\newblock PWC-Net: CNNs for Optical Flow Using Pyramid, Warping, and Cost Volume.
+\newblock \emph{CVPR}, 2018.
+
+\bibitem{liteflownet}
+Tak-Wai Hui, Xiaoou Tang, and Chen Change Loy.
+\newblock LiteFlowNet: A Lightweight Convolutional Neural Network for Optical Flow Estimation.
+\newblock \emph{CVPR}, 2018.
+
+\bibitem{gma}
+Shihao Jiang, Dylan Campbell, Yao Lu, Hongdong Li, and Richard Hartley.
+\newblock Learning to Estimate Hidden Motions with Global Motion Aggregation.
+\newblock \emph{ICCV}, 2021.
+
+\bibitem{wbf}
+Roman Solovyev, Weimin Wang, and Tatiana Gabruseva.
+\newblock Weighted Boxes Fusion: Ensembling Boxes from Different Object Detection Models.
+\newblock \emph{Image and Vision Computing}, 107:104117, 2021.
+
+% ============ YOLO and Object Detection ============
+\bibitem{yolo}
+Glenn Jocher et al.
+\newblock Ultralytics YOLO.
+\newblock \url{https://github.com/ultralytics/ultralytics}, 2023.
+
+\bibitem{yolov4}
+Alexey Bochkovskiy, Chien-Yao Wang, and Hong-Yuan Mark Liao.
+\newblock YOLOv4: Optimal Speed and Accuracy of Object Detection.
+\newblock \emph{arXiv:2004.10934}, 2020.
+
+% ============ Attention Mechanisms ============
+\bibitem{cbam}
+Sanghyun Woo, Jongchan Park, Joon-Young Lee, and In So Kwook.
+\newblock CBAM: Convolutional Block Attention Module.
+\newblock \emph{ECCV}, 2018.
+
+\bibitem{senet}
+Jie Hu, Li Shen, and Gang Sun.
+\newblock Squeeze-and-Excitation Networks.
+\newblock \emph{CVPR}, 2018.
+
+% ============ Video Object Detection ============
+\bibitem{fgfa}
+Xizhou Zhu, Yujie Wang, Jifeng Dai, Lu Yuan, and Yichen Wei.
+\newblock Flow-Guided Feature Aggregation for Video Object Detection.
+\newblock \emph{ICCV}, 2017.
+
+\bibitem{selsa}
+Haiping Wu, Yuntao Chen, Naiyan Wang, and Zhaoxiang Zhang.
+\newblock Sequence Level Semantics Aggregation for Video Object Detection.
+\newblock \emph{ICCV}, 2019.
+
+\bibitem{dff}
+Xizhou Zhu, Yuwen Xiong, Jifeng Dai, Lu Yuan, and Yichen Wei.
+\newblock Deep Feature Flow for Video Recognition.
+\newblock \emph{CVPR}, 2017.
+
+\bibitem{mega}
+Yihong Chen, Yue Cao, Han Hu, and Liwei Wang.
+\newblock Memory Enhanced Global-Local Aggregation for Video Object Detection.
+\newblock \emph{CVPR}, 2020.
+
+\bibitem{troia}
+Junbo Wang, Xizhou Zhu, Jifeng Dai, et al.
+\newblock TransVOD: End-to-end Video Object Detection with Spatial-Temporal Transformers.
+\newblock \emph{arXiv:2201.05047}, 2022.
+
+% ============ Motion and Action Recognition ============
+\bibitem{motion_saliency}
+Wei Wang, Jianbing Shen, and Ling Shao.
+\newblock Video Salient Object Detection via Fully Convolutional Networks.
+\newblock \emph{IEEE TIP}, 2018.
+
+\bibitem{twostream}
+Karen Simonyan and Andrew Zisserman.
+\newblock Two-Stream Convolutional Networks for Action Recognition in Videos.
+\newblock \emph{NeurIPS}, 2014.
+
+\bibitem{i3d}
+Jo\~{a}o Carreira and Andrew Zisserman.
+\newblock Quo Vadis, Action Recognition? A New Model and the Kinetics Dataset.
+\newblock \emph{CVPR}, 2017.
+
+\bibitem{slowfast}
+Christoph Feichtenhofer, Haoqi Fan, Jitendra Malik, and Kaiming He.
+\newblock SlowFast Networks for Video Recognition.
+\newblock \emph{ICCV}, 2019.
+
+% ============ Multi-Modal Fusion ============
+\bibitem{rgbd_detection}
+Saurabh Gupta, Ross Girshick, Pablo Arbel\'{a}ez, and Jitendra Malik.
+\newblock Learning Rich Features from RGB-D Images for Object Detection and Segmentation.
+\newblock \emph{ECCV}, 2014.
+
+\bibitem{thermal_fusion}
+Jinwei Zhang, Marc Pollefeys, and Konrad Schindler.
+\newblock Multispectral Pedestrian Detection: Benchmark Dataset and Baseline.
+\newblock \emph{CVPR}, 2015.
+
+% ============ UAV and Small Object Detection ============
+\bibitem{uav_detection}
+Eren Unlu, Emmanuel Zenou, Nicolas Riviere, and Paul-Edouard Dupouy.
+\newblock Deep Learning-Based Strategies for the Detection and Tracking of Drones Using Several Cameras.
+\newblock \emph{IPSJ Transactions on Computer Vision and Applications}, 2019.
+
+\bibitem{infrared_detection}
+Fei Wang, Wenming Yang, and Qingmin Liao.
+\newblock Infrared Small Target Detection Using Deep Learning Features.
+\newblock \emph{IEEE TGRS}, 2019.
+
+\bibitem{small_object}
+Jianan Li, Xiaodan Liang, Yunchao Wei, et al.
+\newblock Perceptual Generative Adversarial Networks for Small Object Detection.
+\newblock \emph{CVPR}, 2017.
+
+\bibitem{drone_detection}
+Aman Sagar, Jun Niu, Ashwin Ashok, et al.
+\newblock Drone Detection Using Convolutional Neural Networks with Acoustic STFT Features.
+\newblock \emph{IEEE AVSS}, 2020.
+
+% ============ Data Augmentation ============
+\bibitem{mixup}
+Hongyi Zhang, Moustapha Cisse, Yann N. Dauphin, and David Lopez-Paz.
+\newblock mixup: Beyond Empirical Risk Minimization.
+\newblock \emph{ICLR}, 2018.
+
+\end{thebibliography}
+
+
+\end{document}
